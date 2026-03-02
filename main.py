@@ -171,9 +171,11 @@ def main():
     
     app.add_handler(CallbackQueryHandler(admin_management_callback, pattern="^admin_"))
 
-    # Регистрируем обработчики callback для настроек, расписания и управления админами
+    # Регистрируем обработчики callback для настроек, расписания и управления админами - ПОСЛЕДНИМ
     app.add_handler(CallbackQueryHandler(handle_settings_callback)) 
     
+    
+
     # Чистый запуск
     print("=" * 60)
     print("🚀 Maraphon Bot запущен")

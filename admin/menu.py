@@ -7,7 +7,6 @@ from config import Config
 from .keyboards import ADMIN_KEYBOARD, TOPICS_SUBMENU
 from utils.logger import log_admin_action
 from utils.auto_delete import auto_delete_user_message
-from utils.chat_cleaner import clean_chat, save_message
 
 async def is_chat_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Проверяет, является ли пользователь администратором"""
@@ -34,11 +33,9 @@ async def is_chat_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> b
     return False
 
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, keyboard):
-    """Показывает меню, предварительно очистив чат"""
-    # Очищаем чат от старых сообщений
-    await clean_chat(update, context)
+    """Показывает меню без удалений"""
     
-    # Отправляем новое сообщение
+    # Просто отправляем новое сообщение
     if update.callback_query:
         sent = await update.callback_query.message.reply_text(
             text,
@@ -52,9 +49,6 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, text: st
             reply_markup=keyboard,
             parse_mode='HTML'
         )
-    
-    # Сохраняем ID сообщения
-    await save_message(context, update.effective_chat.id, sent.message_id)
 
 @auto_delete_user_message
 async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):

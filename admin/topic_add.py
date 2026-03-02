@@ -3,40 +3,58 @@ import re
 import asyncio
 from datetime import datetime
 import pytz
-from telegram import Update, ReplyKeyboardRemove
+from telegram import Update
 from telegram.ext import ContextTypes
 from db.database import SessionLocal
 from db.models import TopicRule
 from config import Config
 from utils.hashtag_utils import normalize_hashtag, validate_hashtag_prefix
-from utils.auto_delete import reply_and_del, auto_delete_user_message
 from .keyboards import ADMIN_KEYBOARD, TOPICS_SUBMENU
 
-@auto_delete_user_message
 async def request_topic_format(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    example = (
-        "📋 Отправьте данные темы одним сообщением в формате:\n\n"
+    """Показывает информацию о добавлении темы и отправляет чистый пример"""
+    
+    # Текст примера для копирования
+    clean_example = (
         "• Ссылка на тему: https://t.me/c/3849962819/2\n"
         "• Начало: 05.02.2026 11:00\n"
         "• Окончание: 05.02.2026 12:00\n"
         "• Балл: 10\n"
         "• Хештег: послевкусие_01"
     )
-    await reply_and_del(update.message, example, reply_markup=ReplyKeyboardRemove())
+    
+    # Информационное сообщение - здесь нужно сохранить меню тем
+    info_text = (
+        "📋 <b>Добавление новой темы</b>\n\n"
+        "Отправьте данные одним сообщением в формате из примера ниже.\n\n"
+        "⏳ <b>Ожидаю ваше сообщение с данными...</b>"
+    )
+    
+    # Отправляем с меню тем, чтобы оно не пропадало
+    await update.message.reply_text(
+        info_text,
+        parse_mode='HTML',
+        reply_markup=TOPICS_SUBMENU  # ← ВАЖНО! Явно указываем меню
+    )
+    
+    # Пример для копирования - тоже с меню
+    await update.message.reply_text(
+        f"<code>{clean_example}</code>",
+        parse_mode='HTML',
+        reply_markup=TOPICS_SUBMENU  # ← ВАЖНО! Явно указываем меню
+    )
 
-@auto_delete_user_message
 async def add_topic_single(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private" or update.effective_user.id not in Config.ADMIN_IDS:
         return
 
-    # Если админ сейчас вводит ссылку для чата знакомства — обрабатываем это, а не парсим тему
+    # Если админ сейчас вводит ссылку для чата знакомства — обрабатываем это
     try:
         from admin.settings import handle_intro_chat_link_message
         handled = await handle_intro_chat_link_message(update, context)
         if handled:
             return
     except Exception:
-        # Не блокируем добавление темы, даже если что-то пошло не так в настройках
         pass
     
     text = update.message.text.strip()
@@ -108,25 +126,23 @@ async def add_topic_single(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if errors:
         error_text = "⚠️ Ошибки валидации:\n" + "\n".join(errors) + "\n\nПопробуйте снова:"
-        # Ошибка - удаляется через 3 сек
-        await reply_and_del(update.message, error_text, reply_markup=ReplyKeyboardRemove())
+        # Возвращаем меню тем при ошибке
+        await update.message.reply_text(error_text, reply_markup=TOPICS_SUBMENU)
         return
     
     session = SessionLocal()
     try:
-        # ПРОВЕРКА НА УНИКАЛЬНОСТЬ ХЕШТЕГА
-        # Проверяем, существует ли уже такой хештег в этом чате
+        # Проверка на уникальность хештега
         existing_rule = session.query(TopicRule).filter_by(
             chat_id=Config.ALLOWED_CHAT_IDS[0],
             hashtag_prefix=hashtag_prefix
         ).first()
         
         if existing_rule:
-            # Формируем информацию о существующей теме
             start_str = existing_rule.start_datetime.strftime("%d.%m.%Y %H:%M") if existing_rule.start_datetime else "—"
             end_str = existing_rule.end_datetime.strftime("%d.%m.%Y %H:%M") if existing_rule.end_datetime else "—"
             
-            # Сообщение с инлайн-кнопками - НЕ УДАЛЯЕМ
+            # Возвращаем меню тем
             await update.message.reply_text(
                 f"❌ Хештег #{hashtag_prefix} уже существует!\n\n"
                 f"Информация о существующей теме:\n"
@@ -161,11 +177,12 @@ async def add_topic_single(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Окончание: {end_datetime.strftime('%d.%m.%Y %H:%M')}\n"
             f"• Балл: {point_value}"
         )
-        # Успех - удаляется через 3 сек
-        await reply_and_del(update.message, response, reply_markup=ADMIN_KEYBOARD)
+        # Возвращаем меню тем
+        await update.message.reply_text(response, reply_markup=TOPICS_SUBMENU)
+        
     except Exception as e:
         session.rollback()
-        # Ошибка - удаляется через 3 сек
-        await reply_and_del(update.message, f"❌ Ошибка сохранения: {e}", reply_markup=TOPICS_SUBMENU)
+        # Возвращаем меню тем при ошибке
+        await update.message.reply_text(f"❌ Ошибка сохранения: {e}", reply_markup=TOPICS_SUBMENU)
     finally:
         session.close()
