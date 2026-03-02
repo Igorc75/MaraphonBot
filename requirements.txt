@@ -1,0 +1,11 @@
+# requirements.txt
+python-telegram-bot[job-queue]==20.7
+python-dotenv==1.0.0
+sqlalchemy==2.0.23
+pytz==2023.3
+alembic==1.12.1
+pytest==7.4.3
+black==23.11.0
+ruff==0.1.6
+mypy==1.7.1
+isort==5.12.0

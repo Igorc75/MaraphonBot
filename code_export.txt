@@ -1,0 +1,3882 @@
+================================================================================
+Python Code Export
+Root: /Users/ingvarr/job/MaraphonBot
+Date: 2026-03-01 23:33:22
+Files: 39
+================================================================================
+
+
+################################################################################
+# 1/39: admin/__init__.py
+################################################################################
+
+# admin/__init__.py
+from .topic_edit import (
+    show_edit_topics,
+    edit_topic_select,
+    edit_topic_field,
+    edit_topic_value,
+    edit_cancel,
+    timeout_handler,
+)
+from .schedule import (
+    schedule_handler,
+    schedule_callback,
+    get_schedule_handlers
+)
+from .admin_manager import (
+    show_admin_management,
+    admin_management_callback,
+    create_invite,
+    list_invites,
+    cleanup_invites,
+    handle_invite_token
+)
+
+__all__ = [
+    'show_edit_topics',
+    'edit_topic_select',
+    'edit_topic_field',
+    'edit_topic_value',
+    'edit_cancel',
+    'timeout_handler',
+    'schedule_handler',
+    'schedule_callback',
+    'get_schedule_handlers',
+    'show_admin_management',
+    'admin_management_callback',
+    'create_invite',
+    'list_invites',
+    'cleanup_invites',
+    'handle_invite_token',
+]
+
+
+################################################################################
+# 2/39: admin/admin_manager.py
+################################################################################
+
+# admin/admin_manager.py
+import secrets
+import string
+from datetime import datetime, timedelta
+from typing import Optional, Tuple
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import ContextTypes
+from db.database import SessionLocal
+from db.models import AdminInvite, AdminInviteUsage, AdminSettings
+from config import Config
+from .decorators import admin_required
+from .keyboards import ADMIN_KEYBOARD, BACK_TO_ADMIN_MANAGEMENT
+import asyncio
+from utils.cleanup import delete_after_3s
+
+def generate_invite_token(length=32) -> str:
+    """Генерирует безопасный токен для инвайта"""
+    alphabet = string.ascii_letters + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
+
+def create_invite_link(bot_username: str, token: str) -> str:
+    """Создает ссылку для приглашения"""
+    return f"https://t.me/{bot_username}?start=admin_{token}"
+
+async def show_admin_management(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает меню управления администраторами - сразу список админов"""
+    if update.effective_user.id not in Config.ADMIN_IDS:
+        return
+    
+    # Получаем список админов
+    text, keyboard = await get_admins_list_with_actions(context)
+    
+    await update.message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='HTML'
+    )
+
+async def get_admins_list_with_actions(context: ContextTypes.DEFAULT_TYPE):
+    """Возвращает текст списка админов и клавиатуру действий"""
+    try:
+        # Получаем суперадминов из конфига
+        super_admins = Config.ADMIN_IDS
+        
+        # Получаем администраторов из базы
+        session = SessionLocal()
+        db_admins = session.query(AdminSettings).all()
+        session.close()
+        
+        # Формируем текст
+        text = "👥 <b>Управление администраторами</b>\n\n"
+        
+        # Суперадмины (из .env)
+        text += "<b>🔸 Суперадминистраторы (из .env):</b>\n"
+        for i, admin_id in enumerate(super_admins, 1):
+            try:
+                user = await context.bot.get_chat(admin_id)
+                name = user.first_name or user.username or f"ID: {admin_id}"
+                text += f"{i}. 👑 {name} (ID: <code>{admin_id}</code>)\n"
+            except:
+                text += f"{i}. 👑 ID: <code>{admin_id}</code> (не найден в Telegram)\n"
+        
+        # Администраторы из базы
+        text += "\n<b>🔹 Администраторы (добавленные):</b>\n"
+        if db_admins:
+            for i, admin in enumerate(db_admins, 1):
+                try:
+                    user = await context.bot.get_chat(admin.user_id)
+                    name = user.first_name or user.username or f"ID: {admin.user_id}"
+                    
+                    # Проверяем, активен ли администратор
+                    is_active = "✅" if admin.receive_csv is not None else "⚠️"
+                    text += f"{i}. {is_active} {name} (ID: <code>{admin.user_id}</code>)\n"
+                except:
+                    text += f"{i}. ⚠️ ID: <code>{admin.user_id}</code> (не найден в Telegram)\n"
+        else:
+            text += "  📭 Нет добавленных администраторов\n"
+        
+        # Статистика
+        total = len(super_admins) + len(db_admins)
+        text += f"\n📊 <b>Всего администраторов:</b> {total}\n"
+        
+        # Клавиатура действий
+        keyboard = []
+        
+        # Основные действия
+        keyboard.append([
+            InlineKeyboardButton("➕ Создать инвайт-ссылку", callback_data="admin_create_invite"),
+            InlineKeyboardButton("📋 Активные инвайты", callback_data="admin_list_invites")
+        ])
+        
+        # Кнопки удаления для каждого админа из базы
+        if db_admins:
+            for admin in db_admins:
+                if admin.user_id not in Config.ADMIN_IDS:  # Не удаляем суперадминов
+                    try:
+                        user = await context.bot.get_chat(admin.user_id)
+                        name = user.first_name or user.username[:15] or f"ID:{admin.user_id}"
+                    except:
+                        name = f"ID:{admin.user_id}"
+                    
+                    keyboard.append([
+                        InlineKeyboardButton(
+                            f"🗑️ Удалить {name}", 
+                            callback_data=f"admin_delete_{admin.user_id}"
+                        )
+                    ])
+        
+        # Кнопка назад
+        keyboard.append([InlineKeyboardButton("⬅️ Назад к настройкам", callback_data="admin_management_back")])
+        
+        return text, keyboard
+        
+    except Exception as e:
+        print(f"Ошибка получения списка админов: {e}")
+        return f"❌ Ошибка: {str(e)}", [[InlineKeyboardButton("⬅️ Назад", callback_data="admin_management_back")]]
+
+@admin_required
+async def create_invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Создает новую инвайт-ссылку"""
+    query = update.callback_query
+    await query.answer()
+    
+    session = SessionLocal()
+    try:
+        # Генерируем токен
+        token = generate_invite_token()
+        
+        # Создаем инвайт (действует 24 часа, одноразовый)
+        invite = AdminInvite(
+            token=token,
+            created_by=query.from_user.id,
+            expires_at=datetime.now() + timedelta(hours=24),
+            max_uses=1,
+            is_active=True
+        )
+        
+        session.add(invite)
+        session.commit()
+        
+        # Получаем username бота
+        bot_info = await context.bot.get_me()
+        bot_username = bot_info.username
+        
+        # Создаем ссылку
+        invite_link = create_invite_link(bot_username, token)
+        
+        # Формируем сообщение
+        text = (
+            f"✅ <b>Инвайт-ссылка создана!</b>\n\n"
+            f"🔗 <code>{invite_link}</code>\n\n"
+            f"📊 <b>Информация:</b>\n"
+            f"• Действует: 24 часа\n"
+            f"• Одноразовая\n"
+            f"• Создана: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
+            f"• Истекает: {invite.expires_at.strftime('%d.%m.%Y %H:%M')}\n\n"
+            f"📋 <b>Отправьте эту ссылку новому администратору.</b>\n"
+            f"При переходе по ссылке пользователь будет добавлен в администраторы."
+        )
+        
+        keyboard = [
+            [InlineKeyboardButton("📋 К списку админов", callback_data="admin_list_refresh")],
+            [InlineKeyboardButton("⬅️ Назад к настройкам", callback_data="admin_management_back")]
+        ]
+        
+        await query.message.edit_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
+        )
+        
+    except Exception as e:
+        print(f"Ошибка создания инвайта: {e}")
+        await query.message.edit_text(
+            f"❌ Ошибка: {str(e)}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Назад", callback_data="admin_management_back")]
+            ])
+        )
+    finally:
+        session.close()
+
+async def list_invites(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает список активных инвайтов"""
+    query = update.callback_query
+    await query.answer()
+    
+    session = SessionLocal()
+    try:
+        invites = session.query(AdminInvite).filter_by(is_active=True).all()
+        
+        if not invites:
+            await query.message.edit_text(
+                "📭 <b>Нет активных инвайт-ссылок</b>",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("➕ Создать инвайт", callback_data="admin_create_invite")],
+                    [InlineKeyboardButton("⬅️ Назад к списку админов", callback_data="admin_list_refresh")]
+                ]),
+                parse_mode='HTML'
+            )
+            return
+        
+        # Получаем username бота для формирования ссылок
+        bot_info = await context.bot.get_me()
+        bot_username = bot_info.username
+        
+        text = "📋 <b>Активные инвайт-ссылки:</b>\n\n"
+        
+        for invite in invites:
+            status = "✅" if invite.is_active else "❌"
+            expires_in = (invite.expires_at - datetime.now()).total_seconds() / 3600
+            
+            if expires_in <= 0:
+                status = "⌛"
+            
+            invite_link = create_invite_link(bot_username, invite.token)
+            
+            text += f"{status} <b>Инвайт #{invite.id}</b>\n"
+            text += f"   🔗 <code>{invite_link}</code>\n"
+            text += f"   👤 Использован: {invite.used_count}/{invite.max_uses}\n"
+            text += f"   ⏰ Истекает через: {expires_in:.1f} часов\n"
+            text += f"   📅 Создан: {invite.created_at.strftime('%d.%m.%Y %H:%M')}\n\n"
+        
+        keyboard = [
+            [InlineKeyboardButton("➕ Создать новый инвайт", callback_data="admin_create_invite")],
+            [InlineKeyboardButton("🗑️ Удалить истёкшие", callback_data="admin_cleanup_invites")],
+            [InlineKeyboardButton("⬅️ Назад к списку админов", callback_data="admin_list_refresh")]
+        ]
+        
+        await query.message.edit_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
+        )
+        
+    except Exception as e:
+        print(f"Ошибка получения списка инвайтов: {e}")
+        await query.message.edit_text(
+            f"❌ Ошибка: {str(e)}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Назад", callback_data="admin_management_back")]
+            ])
+        )
+    finally:
+        session.close()
+
+async def delete_admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает удаление администратора"""
+    query = update.callback_query
+    await query.answer()
+    
+    # Получаем ID админа для удаления
+    admin_id = int(query.data.split("_")[2])
+    
+    # Проверяем, что не пытаемся удалить суперадмина из .env
+    if admin_id in Config.ADMIN_IDS:
+        await query.message.edit_text(
+            "❌ <b>Нельзя удалить суперадминистратора (из .env)</b>\n\n"
+            "Суперадминистраторы управляются через файл конфигурации.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Назад к списку админов", callback_data="admin_list_refresh")]
+            ]),
+            parse_mode='HTML'
+        )
+        return
+    
+    session = SessionLocal()
+    try:
+        # Ищем админа в базе
+        admin = session.query(AdminSettings).filter_by(user_id=admin_id).first()
+        
+        if not admin:
+            await query.message.edit_text(
+                f"❌ Администратор с ID <code>{admin_id}</code> не найден в базе",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⬅️ Назад к списку админов", callback_data="admin_list_refresh")]
+                ]),
+                parse_mode='HTML'
+            )
+            return
+        
+        # Запрашиваем подтверждение
+        try:
+            user = await context.bot.get_chat(admin_id)
+            admin_name = user.first_name or user.username or f"ID: {admin_id}"
+        except:
+            admin_name = f"ID: {admin_id}"
+        
+        confirm_text = (
+            f"⚠️ <b>Подтверждение удаления</b>\n\n"
+            f"Вы действительно хотите удалить администратора?\n\n"
+            f"👤 <b>{admin_name}</b>\n"
+            f"🆔 ID: <code>{admin_id}</code>\n\n"
+            f"Это действие нельзя отменить!"
+        )
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Да, удалить", callback_data=f"admin_delete_confirm_{admin_id}"),
+                InlineKeyboardButton("❌ Нет, отмена", callback_data="admin_list_refresh")
+            ]
+        ]
+        
+        await query.message.edit_text(
+            confirm_text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
+        )
+        
+    except Exception as e:
+        print(f"Ошибка при подготовке удаления: {e}")
+        await query.message.edit_text(
+            f"❌ Ошибка: {str(e)}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Назад", callback_data="admin_management_back")]
+            ])
+        )
+    finally:
+        session.close()
+
+async def confirm_delete_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Подтверждает и выполняет удаление администратора"""
+    query = update.callback_query
+    await query.answer()
+    
+    admin_id = int(query.data.split("_")[3])
+    
+    session = SessionLocal()
+    try:
+        admin = session.query(AdminSettings).filter_by(user_id=admin_id).first()
+        
+        if admin:
+            session.delete(admin)
+            session.commit()
+            
+            # Показываем успешное сообщение
+            try:
+                user = await context.bot.get_chat(admin_id)
+                admin_name = user.first_name or user.username or f"ID: {admin_id}"
+            except:
+                admin_name = f"ID: {admin_id}"
+            
+            success_text = (
+                f"✅ <b>Администратор удален</b>\n\n"
+                f"👤 {admin_name}\n"
+                f"🆔 ID: <code>{admin_id}</code>\n\n"
+                f"Теперь у этого пользователя нет доступа к админ-панели."
+            )
+            
+            # Обновляем список админов
+            text, keyboard = await get_admins_list_with_actions(context)
+            
+            await query.message.edit_text(
+                text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='HTML'
+            )
+            
+            # Временное подтверждение
+            msg = await query.message.reply_text("✅ Администратор успешно удален")
+            asyncio.create_task(delete_after_3s(msg))
+        else:
+            await query.message.edit_text(
+                "❌ Администратор не найден",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⬅️ Назад к списку админов", callback_data="admin_list_refresh")]
+                ])
+            )
+            
+    except Exception as e:
+        session.rollback()
+        print(f"Ошибка удаления администратора: {e}")
+        await query.message.edit_text(
+            f"❌ Ошибка при удалении: {str(e)}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Назад", callback_data="admin_management_back")]
+            ])
+        )
+    finally:
+        session.close()
+
+async def cleanup_invites(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Удаляет истекшие инвайты"""
+    query = update.callback_query
+    await query.answer()
+    
+    session = SessionLocal()
+    try:
+        # Находим истекшие или использованные инвайты
+        expired_invites = session.query(AdminInvite).filter(
+            (AdminInvite.expires_at < datetime.now()) | 
+            (AdminInvite.used_count >= AdminInvite.max_uses)
+        ).all()
+        
+        deleted_count = 0
+        for invite in expired_invites:
+            session.delete(invite)
+            deleted_count += 1
+        
+        session.commit()
+        
+        await query.message.edit_text(
+            f"✅ Удалено {deleted_count} истёкших/использованных инвайтов",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📋 К списку инвайтов", callback_data="admin_list_invites")],
+                [InlineKeyboardButton("⬅️ Назад к списку админов", callback_data="admin_list_refresh")]
+            ])
+        )
+        
+    except Exception as e:
+        session.rollback()
+        print(f"Ошибка очистки инвайтов: {e}")
+        await query.message.edit_text(
+            f"❌ Ошибка: {str(e)}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Назад", callback_data="admin_management_back")]
+            ])
+        )
+    finally:
+        session.close()
+
+async def refresh_admin_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обновляет список админов"""
+    query = update.callback_query
+    await query.answer()
+    
+    text, keyboard = await get_admins_list_with_actions(context)
+    
+    await query.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='HTML'
+    )
+
+async def handle_invite_token(user_id: int, token: str, context: ContextTypes.DEFAULT_TYPE) -> Tuple[bool, str]:
+    """Обрабатывает использование инвайт-токена"""
+    session = SessionLocal()
+    try:
+        # Ищем токен
+        invite = session.query(AdminInvite).filter_by(token=token, is_active=True).first()
+        
+        if not invite:
+            return False, "❌ Инвайт-ссылка не найдена или неактивна"
+        
+        # Проверяем срок действия
+        if invite.expires_at < datetime.now():
+            invite.is_active = False
+            session.commit()
+            return False, "❌ Срок действия инвайт-ссылки истёк"
+        
+        # Проверяем лимит использований
+        if invite.used_count >= invite.max_uses:
+            invite.is_active = False
+            session.commit()
+            return False, "❌ Инвайт-ссылка уже использована"
+        
+        # Проверяем, не является ли пользователь уже администратором
+        existing_admin = session.query(AdminSettings).filter_by(user_id=user_id).first()
+        if existing_admin:
+            return False, "⚠️ Вы уже являетесь администратором"
+        
+        # Проверяем, не входит ли пользователь в суперадмины
+        if user_id in Config.ADMIN_IDS:
+            return False, "⚠️ Вы уже являетесь суперадминистратором"
+        
+        # Создаем запись администратора
+        admin_settings = AdminSettings(
+            user_id=user_id,
+            receive_csv=False  # По умолчанию не получает CSV
+        )
+        session.add(admin_settings)
+        
+        # Обновляем статистику использования инвайта
+        invite.used_count += 1
+        
+        # Если достигнут лимит - деактивируем
+        if invite.used_count >= invite.max_uses:
+            invite.is_active = False
+        
+        # Записываем использование
+        usage = AdminInviteUsage(
+            invite_id=invite.id,
+            used_by=user_id
+        )
+        session.add(usage)
+        
+        session.commit()
+        
+        return True, "✅ Вы успешно добавлены в администраторы!\n\n" \
+                     "Теперь у вас есть доступ к админ-панели. Используйте команду /admin для входа."
+        
+    except Exception as e:
+        session.rollback()
+        print(f"Ошибка обработки инвайт-токена: {e}")
+        return False, f"❌ Ошибка: {str(e)}"
+    finally:
+        session.close()
+
+async def admin_management_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает callback от меню управления администраторами"""
+    query = update.callback_query
+    
+    if not query:
+        return
+    
+    await query.answer()
+    
+    if query.data == "admin_management_back":
+        from .settings import show_settings_panel
+        await show_settings_panel(update, context)
+        return
+    
+    elif query.data == "admin_list_refresh":
+        await refresh_admin_list(update, context)
+    
+    elif query.data == "admin_create_invite":
+        await create_invite(update, context)
+    
+    elif query.data == "admin_list_invites":
+        await list_invites(update, context)
+    
+    elif query.data.startswith("admin_delete_") and "confirm" not in query.data:
+        await delete_admin_handler(update, context)
+    
+    elif query.data.startswith("admin_delete_confirm_"):
+        await confirm_delete_admin(update, context)
+    
+    elif query.data == "admin_cleanup_invites":
+        await cleanup_invites(update, context)
+
+
+################################################################################
+# 3/39: admin/auth.py
+################################################################################
+
+# admin/auth.py - обновленная версия
+from telegram.ext import ContextTypes
+from telegram import Update
+from config import Config
+from db.database import SessionLocal
+from db.models import AdminSettings
+
+async def is_chat_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Проверяет, является ли пользователь администратором"""
+    if not update.effective_user or not update.effective_chat:
+        return False
+    
+    user_id = update.effective_user.id
+    
+    # 1. Проверяем суперадминов из конфига
+    if user_id in Config.ADMIN_IDS:
+        return True
+    
+    # 2. Проверяем администраторов из базы данных
+    session = SessionLocal()
+    try:
+        admin = session.query(AdminSettings).filter_by(user_id=user_id).first()
+        if admin:
+            return True
+    except Exception:
+        pass
+    finally:
+        session.close()
+    
+    # 3. Для суперчатов дополнительно проверяем права в чате
+    if update.effective_chat.type in ["group", "supergroup"]:
+        try:
+            admins = await context.bot.get_chat_administrators(update.effective_chat.id)
+            admin_ids = [admin.user.id for admin in admins]
+            return user_id in admin_ids
+        except Exception:
+            return False
+    
+    return False
+
+
+################################################################################
+# 4/39: admin/decorators.py
+################################################################################
+
+# admin/decorators.py
+from functools import wraps
+from telegram import Update
+from telegram.ext import ContextTypes
+from config import Config
+from .auth import is_chat_admin
+
+def admin_required(func):
+    """Декоратор для проверки прав администратора"""
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        if not await is_chat_admin(update, context):
+            if update.message:
+                await update.message.reply_text("❌ Доступ запрещён")
+            elif update.callback_query:
+                await update.callback_query.answer("❌ Доступ запрещён", show_alert=True)
+            return
+        return await func(update, context, *args, **kwargs)
+    return wrapper
+
+
+################################################################################
+# 5/39: admin/keyboards.py
+################################################################################
+
+# admin/keyboards.py
+from telegram import ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
+
+# Главное меню
+ADMIN_KEYBOARD = ReplyKeyboardMarkup(
+    [["📋 Темы", "📊 Статистика"], ["📅 Расписание", "⚙️ Настройка"]],
+    resize_keyboard=True,
+    one_time_keyboard=False,
+    input_field_placeholder="Выберите действие..."
+)
+
+# Подменю тем
+TOPICS_SUBMENU = ReplyKeyboardMarkup(
+    [
+        ["👁️ Список тем", "➕ Добавить"],
+        ["✏️ Редактировать", "🗑️ Удалить"],
+        ["⬅️ Назад в меню"]
+    ],
+    resize_keyboard=True,
+    one_time_keyboard=False,
+    input_field_placeholder="Действие с темами..."
+)
+
+# Подменю настроек
+SETTINGS_SUBMENU = ReplyKeyboardMarkup(
+    [
+        ["📁 CSV отчеты", "👥 Админы"],
+        ["👋 Чат знакомства"],
+        ["⬅️ Назад в меню"]
+    ],
+    resize_keyboard=True,
+    one_time_keyboard=False,
+    input_field_placeholder="Выберите настройку..."
+)
+
+# Клавиатура для возврата к настройкам
+BACK_TO_SETTINGS = ReplyKeyboardMarkup(
+    [["⬅️ Назад к настройкам"]],
+    resize_keyboard=True,
+    one_time_keyboard=False
+)
+
+# Клавиатура для возврата к управлению админами
+BACK_TO_ADMIN_MANAGEMENT = ReplyKeyboardMarkup(
+    [["⬅️ Назад к управлению админами"]],
+    resize_keyboard=True,
+    one_time_keyboard=False
+)
+
+
+################################################################################
+# 6/39: admin/menu.py
+################################################################################
+
+# admin/menu.py - УЛУЧШЕННАЯ ВЕРСИЯ
+from telegram import Update
+from telegram.ext import ContextTypes
+from db.database import SessionLocal
+from db.models import AdminSettings
+from config import Config
+from .keyboards import ADMIN_KEYBOARD, TOPICS_SUBMENU
+from utils.logger import log_admin_action
+
+async def is_chat_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Проверяет, является ли пользователь администратором"""
+    if not update.effective_user or not update.effective_chat:
+        return False
+    
+    user_id = update.effective_user.id
+    
+    # 1. Суперадмины из конфига
+    if user_id in Config.ADMIN_IDS:
+        return True
+    
+    # 2. Админы из базы
+    session = SessionLocal()
+    try:
+        admin_settings = session.query(AdminSettings).filter_by(user_id=user_id).first()
+        if admin_settings:
+            return True
+    except Exception as e:
+        print(f"Ошибка проверки админа в БД: {e}")
+    finally:
+        session.close()
+    
+    # 3. Админы чата (только для групп)
+    if update.effective_chat.type in ["group", "supergroup"]:
+        try:
+            admins = await context.bot.get_chat_administrators(update.effective_chat.id)
+            admin_ids = [admin.user.id for admin in admins]
+            return user_id in admin_ids
+        except Exception as e:
+            print(f"Ошибка проверки админов чата: {e}")
+    
+    return False
+
+async def send_message_safely(update, context, text, **kwargs):
+    """Безопасная отправка сообщения"""
+    try:
+        if update.message:
+            await update.message.reply_text(text, **kwargs)
+        elif update.callback_query:
+            if update.callback_query.message:
+                await update.callback_query.message.reply_text(text, **kwargs)
+            else:
+                await update.effective_chat.send_message(text, **kwargs)
+        else:
+            await update.effective_chat.send_message(text, **kwargs)
+    except Exception as e:
+        print(f"Ошибка отправки: {e}")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=text,
+            **kwargs
+        )
+
+async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Главное меню администратора"""
+    if not await is_chat_admin(update, context):
+        log_admin_action(
+            user_id=update.effective_user.id,
+            action="access_denied",
+            details="Попытка доступа к админке"
+        )
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="❌ Доступ запрещён"
+        )
+        return
+    
+    log_admin_action(
+        user_id=update.effective_user.id,
+        action="menu_opened",
+        details="Главное меню"
+    )
+    
+    await send_message_safely(
+        update=update,
+        context=context,
+        text="🔧 <b>Админка Maraphon</b>",
+        reply_markup=ADMIN_KEYBOARD,
+        parse_mode='HTML'
+    )
+
+async def show_topics_submenu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Подменю управления темами"""
+    if not await is_chat_admin(update, context):
+        return
+    
+    log_admin_action(
+        user_id=update.effective_user.id,
+        action="menu_opened",
+        details="Подменю тем"
+    )
+    
+    await send_message_safely(
+        update=update,
+        context=context,
+        text="📋 <b>Управление темами</b>",
+        reply_markup=TOPICS_SUBMENU,
+        parse_mode='HTML'
+    )
+
+
+################################################################################
+# 7/39: admin/schedule.py
+################################################################################
+
+# admin/schedule.py - ТОЛЬКО ТЕКСТОВОЕ РАСПИСАНИЕ
+from datetime import datetime, timedelta
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import ContextTypes, CallbackQueryHandler
+from db.database import SessionLocal
+from db.models import TopicRule
+from config import Config
+import pytz
+
+async def schedule_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик кнопки расписания"""
+    if update.effective_user.id not in Config.ADMIN_IDS:
+        return
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("📅 Неделя", callback_data="schedule_week"),
+            InlineKeyboardButton("📆 Месяц", callback_data="schedule_month")
+        ],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="schedule_back")]
+    ]
+    
+    await update.message.reply_text(
+        "📊 Выберите период для просмотра расписания:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def schedule_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик callback для расписания"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "schedule_back":
+        # Используем импорт внутри функции чтобы избежать циклического импорта
+        from admin.menu import admin_menu
+        await admin_menu(update, context)
+        return
+    
+    if query.data in ["schedule_week", "schedule_month"]:
+        days = 7 if query.data == "schedule_week" else 30
+        await send_schedule(update, context, days)
+
+async def send_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE, days):
+    """Отправляет текстовое расписание"""
+    query = update.callback_query
+    
+    # Генерируем расписание
+    session = SessionLocal()
+    try:
+        # Используем таймзону из конфига
+        tz = pytz.timezone(Config.TIMEZONE)
+        today = datetime.now(tz)
+        end_date = today + timedelta(days=days)
+        
+        # Получаем правила
+        rules = session.query(TopicRule).filter(
+            TopicRule.chat_id == Config.ALLOWED_CHAT_IDS[0],
+            TopicRule.start_datetime.isnot(None)
+        ).order_by(TopicRule.start_datetime).all()
+        
+        if not rules:
+            await query.message.edit_text(
+                "📭 Нет запланированных тем на выбранный период",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⬅️ Назад", callback_data="schedule_back")]
+                ])
+            )
+            return
+        
+        # Фильтруем по периоду
+        filtered_rules = [
+            r for r in rules 
+            if r.start_datetime and r.start_datetime.date() <= end_date.date()
+        ]
+        
+        if not filtered_rules:
+            await query.message.edit_text(
+                f"📭 Нет тем на ближайшие {days} дней",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⬅️ Назад", callback_data="schedule_back")]
+                ])
+            )
+            return
+        
+        # Формируем красивое текстовое расписание
+        schedule_text = await create_beautiful_schedule(filtered_rules, days, tz)
+        
+        # Клавиатура
+        keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="schedule_back")]]
+        
+        # Отправляем (разбиваем если длинное)
+        if len(schedule_text) > 4000:
+            parts = split_message(schedule_text, 4000)
+            # Отправляем первое сообщение как новое, а не редактируем
+            await query.message.delete()
+            for i, part in enumerate(parts):
+                if i == 0:
+                    await update.effective_chat.send_message(
+                        text=part,
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                        parse_mode='HTML'
+                    )
+                else:
+                    await update.effective_chat.send_message(
+                        text=part,
+                        parse_mode='HTML'
+                    )
+        else:
+            await query.message.edit_text(
+                schedule_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='HTML'
+            )
+        
+    except Exception as e:
+        print(f"Ошибка при формировании расписания: {e}")
+        await query.message.edit_text(
+            f"❌ Ошибка при формировании расписания:\n{str(e)[:200]}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Назад", callback_data="schedule_back")]
+            ])
+        )
+    finally:
+        session.close()
+
+async def create_beautiful_schedule(rules, days, tz):
+    """Создает красивое текстовое расписание в HTML"""
+    # Группируем по дням
+    schedule_by_day = {}
+    for rule in rules:
+        if rule.start_datetime:
+            day_key = rule.start_datetime.date()
+            if day_key not in schedule_by_day:
+                schedule_by_day[day_key] = []
+            schedule_by_day[day_key].append(rule)
+    
+    # Эмодзи для дней недели
+    day_emojis = ["🟢", "🔵", "🟡", "🟣", "🔴", "🟠", "⚪"]
+    day_names = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
+    month_names = [
+        "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+        "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"
+    ]
+    
+    # Формируем HTML
+    html = f"<b>📅 РАСПИСАНИЕ ХЕШТЕГОВ НА {days} ДНЕЙ</b>\n\n"
+    
+    current_month = None
+    # В БД времена хранятся как "московские" naive, поэтому сравниваем в naive
+    now = datetime.now(tz).replace(tzinfo=None)
+    
+    for day_key in sorted(schedule_by_day.keys()):
+        day_date = day_key
+        weekday = day_date.weekday()
+        
+        # Заголовок месяца (если изменился)
+        month_str = f"{month_names[day_date.month - 1]} {day_date.year}"
+        if month_str != current_month:
+            current_month = month_str
+            html += f"<b>🗓️ {month_str.upper()}</b>\n\n"
+        
+        # День
+        html += f"{day_emojis[weekday]} <b>{day_date.strftime('%d.%m.%Y')} ({day_names[weekday]})</b>\n"
+        
+        # События дня (сортируем по времени)
+        day_rules = sorted(schedule_by_day[day_key], 
+                          key=lambda x: x.start_datetime)
+        
+        for rule in day_rules:
+            start_time = rule.start_datetime.strftime("%H:%M") if rule.start_datetime else "--:--"
+            end_time = rule.end_datetime.strftime("%H:%M") if rule.end_datetime else "--:--"
+            
+            # Определяем статус
+            if rule.stop_sent:
+                status = "🔴"  # Завершено
+            elif rule.start_datetime and rule.start_datetime > now:
+                status = "🟡"  # Ожидает
+            else:
+                status = "🟢"  # Активно
+            
+            html += f"  {status} <code>{start_time}-{end_time}</code> <b>#{rule.hashtag_prefix}</b>\n"
+            html += f"     👉 Тема: {rule.thread_id}, 🏆 Баллов: {rule.point_value}\n"
+        
+        html += "\n"
+    
+    # Статистика
+    active = sum(1 for r in rules if not r.stop_sent)
+    completed = sum(1 for r in rules if r.stop_sent)
+    upcoming = sum(1 for r in rules if not r.stop_sent and r.start_datetime and r.start_datetime > now)
+    
+    html += f"{'═' * 20}\n"
+    html += f"<b>📊 СТАТИСТИКА:</b>\n"
+    html += f"• Всего тем: {len(rules)}\n"
+    html += f"• 🟢 Активных сейчас: {active}\n"
+    html += f"• 🟡 Ожидаемых: {upcoming}\n"
+    html += f"• 🔴 Завершённых: {completed}\n"
+    
+    return html
+
+def split_message(text, max_length):
+    """Разбивает сообщение на части по переносу строк"""
+    parts = []
+    while len(text) > max_length:
+        split_at = text[:max_length].rfind('\n')
+        if split_at == -1:
+            split_at = max_length
+        parts.append(text[:split_at])
+        text = text[split_at:].lstrip()
+    parts.append(text)
+    return parts
+
+# Для main.py
+def get_schedule_handlers():
+    """Возвращает обработчики для расписания"""
+    return [
+        CallbackQueryHandler(schedule_callback, pattern="^schedule_")
+    ]
+
+
+################################################################################
+# 8/39: admin/settings.py
+################################################################################
+
+# admin/settings.py - ИСПРАВЛЕННАЯ ВЕРСИЯ
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.error import TelegramError
+from telegram.ext import ContextTypes
+from db.database import SessionLocal
+from db.models import AdminSettings, BotSettings
+from config import Config
+from .keyboards import SETTINGS_SUBMENU, ADMIN_KEYBOARD
+from utils.cleanup import delete_after_3s, delete_after
+from utils.logger import log_admin_action
+import asyncio
+import re
+
+# ==================== ФУНКЦИИ РАБОТЫ С БД ====================
+
+def get_admin_settings(user_id: int):
+    """Получает настройки администратора, создает если нет"""
+    session = SessionLocal()
+    try:
+        settings = session.query(AdminSettings).filter_by(user_id=user_id).first()
+        
+        if not settings:
+            # Проверяем, что пользователь действительно администратор
+            if user_id in Config.ADMIN_IDS:
+                settings = AdminSettings(
+                    user_id=user_id,
+                    receive_csv=False  # По умолчанию не получаем CSV
+                )
+                session.add(settings)
+                session.commit()
+                session.refresh(settings)
+            else:
+                return None
+        
+        return settings
+    except Exception as e:
+        log_admin_action(
+            user_id=user_id,
+            action="error_get_settings",
+            details=f"Ошибка получения настроек: {str(e)}"
+        )
+        session.rollback()
+        return None
+    finally:
+        session.close()
+
+def update_admin_settings(user_id: int, receive_csv: bool = None):
+    """Обновляет настройки администратора"""
+    session = SessionLocal()
+    try:
+        settings = session.query(AdminSettings).filter_by(user_id=user_id).first()
+        
+        if not settings:
+            if user_id in Config.ADMIN_IDS:
+                settings = AdminSettings(user_id=user_id)
+            else:
+                return False
+        
+        if receive_csv is not None:
+            settings.receive_csv = receive_csv
+        
+        session.add(settings)
+        session.commit()
+        return True
+    except Exception as e:
+        log_admin_action(
+            user_id=user_id,
+            action="error_update_settings",
+            details=f"Ошибка обновления настроек: {str(e)}"
+        )
+        session.rollback()
+        return False
+    finally:
+        session.close()
+
+def get_admins_wanting_csv():
+    """Возвращает список администраторов, которые хотят получать CSV"""
+    session = SessionLocal()
+    try:
+        admins = session.query(AdminSettings).filter_by(receive_csv=True).all()
+        admin_ids = [admin.user_id for admin in admins]
+        return admin_ids
+    except Exception as e:
+        log_admin_action(
+            user_id=0,
+            action="error_get_csv_admins",
+            details=f"Ошибка получения списка админов с CSV: {str(e)}"
+        )
+        return []
+    finally:
+        session.close()
+
+# ==================== BOT SETTINGS ====================
+
+def get_bot_settings() -> BotSettings:
+    """Singleton-настройки бота (одна строка)"""
+    session = SessionLocal()
+    try:
+        settings = session.query(BotSettings).filter_by(id=1).first()
+        if not settings:
+            settings = BotSettings(id=1, intro_chat_id=None)
+            session.add(settings)
+            session.commit()
+            session.refresh(settings)
+        return settings
+    finally:
+        session.close()
+
+def set_intro_chat_id(intro_chat_id: int | None) -> bool:
+    session = SessionLocal()
+    try:
+        settings = session.query(BotSettings).filter_by(id=1).first()
+        if not settings:
+            settings = BotSettings(id=1)
+        settings.intro_chat_id = intro_chat_id
+        session.add(settings)
+        session.commit()
+        return True
+    except Exception:
+        session.rollback()
+        return False
+    finally:
+        session.close()
+
+def parse_chat_id_from_link(text: str) -> int | None:
+    """
+    Поддерживаем:
+    - https://t.me/c/<digits>/<msg_id>
+    - t.me/c/<digits>/<msg_id>
+    - -1001234567890 (chat_id)
+    """
+    if not text:
+        return None
+    raw = text.strip()
+
+    # Числовой chat_id
+    if re.fullmatch(r"-?\d{8,20}", raw):
+        try:
+            return int(raw)
+        except ValueError:
+            return None
+
+    m = re.search(r"(?:https?://)?t\.me/c/(\d{5,15})/\d+", raw)
+    if not m:
+        return None
+
+    digits = m.group(1)
+    # В t.me/c/<digits>/... digits == последние 10 цифр abs(chat_id)
+    try:
+        abs_id = int(f"100{digits}")
+        return -abs_id
+    except ValueError:
+        return None
+
+# ==================== ОБРАБОТЧИКИ ТЕЛЕГРАМ ====================
+
+async def show_settings_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает панель настроек администратора - ПОДМЕНЮ"""
+    if update.effective_user.id not in Config.ADMIN_IDS:
+        return
+    
+    log_admin_action(
+        user_id=update.effective_user.id,
+        action="settings_panel_opened",
+        details="Открыта панель настроек"
+    )
+    
+    await update.message.reply_text(
+        "⚙️ <b>Настройки бота</b>\n\n"
+        "Выберите раздел для настройки:",
+        reply_markup=SETTINGS_SUBMENU,
+        parse_mode='HTML'
+    )
+
+async def csv_settings_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик кнопки '📁 CSV отчеты'"""
+    if update.effective_user.id not in Config.ADMIN_IDS:
+        return
+    
+    user_id = update.effective_user.id
+    settings = get_admin_settings(user_id)
+    
+    if not settings:
+        await update.message.reply_text(
+            "❌ Не удалось загрузить настройки. Проверьте подключение к БД.",
+            reply_markup=SETTINGS_SUBMENU
+        )
+        return
+    
+    text = (
+        "⚙️ <b>Настройки администратора</b>\n\n"
+        f"🆔 Ваш ID: {user_id}\n"
+        f"👤 Имя: {update.effective_user.first_name or ''} {update.effective_user.last_name or ''}\n"
+        f"📛 Юзернейм: @{update.effective_user.username or 'не указан'}\n\n"
+        f"📁 <b>Получать CSV файлы после СТОП:</b> {'✅ ВКЛ' if settings.receive_csv else '❌ ВЫКЛ'}\n\n"
+        "Выберите опцию для изменения:"
+    )
+    
+    # Упрощаем текст кнопок
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                f"CSV после СТОП: {'ВКЛ' if settings.receive_csv else 'ВЫКЛ'}",
+                callback_data="toggle_csv_setting"
+            )
+        ],
+        [
+            InlineKeyboardButton("Сбросить все настройки", callback_data="reset_settings")
+        ],
+        [
+            InlineKeyboardButton("Назад к настройкам", callback_data="settings_back")
+        ]
+    ]
+    
+    await update.message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='HTML'
+    )
+
+async def intro_chat_settings_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Настройка чата 'Знакомство'"""
+    if update.effective_user.id not in Config.ADMIN_IDS or update.effective_chat.type != "private":
+        return
+
+    settings = get_bot_settings()
+    intro_chat_id = settings.intro_chat_id
+    if intro_chat_id:
+        try:
+            chat = await context.bot.get_chat(intro_chat_id)
+            intro_text = f"{chat.title} (ID: <code>{intro_chat_id}</code>)"
+        except:
+            intro_text = f"<code>{intro_chat_id}</code> (недоступен)"
+    else:
+        intro_text = "не задан"
+
+    keyboard = [
+        [InlineKeyboardButton("Установить по ссылке", callback_data="introchat_set")],
+        [InlineKeyboardButton("Сбросить", callback_data="introchat_reset")],
+        [InlineKeyboardButton("Назад к настройкам", callback_data="settings_panel")],
+    ]
+
+    await update.message.reply_text(
+        "👋 <b>Чат знакомства</b>\n\n"
+        f"Текущий чат: {intro_text}\n\n"
+        "Нажмите «Установить по ссылке» и пришлите ссылку на любое сообщение из чата знакомства\n"
+        "(формат: <code>https://t.me/c/...</code>).",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML",
+    )
+
+async def handle_intro_chat_link_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """
+    Обрабатывает сообщение со ссылкой на чат знакомства, когда включён режим ожидания.
+    Возвращает True, если сообщение было обработано (чтобы не парсить как тему).
+    """
+    if not context.user_data.get("awaiting_intro_chat_link"):
+        return False
+    context.user_data["awaiting_intro_chat_link"] = False
+
+    text = update.message.text if update.message else ""
+    intro_chat_id = parse_chat_id_from_link(text)
+    if not intro_chat_id:
+        err = await update.message.reply_text(
+            "❌ Неверный формат.\n\nПример ссылки:\n"
+            "<code>https://t.me/c/3849962819/2</code>\n\n"
+            "Или пришлите числовой chat_id (например <code>-100...</code>).",
+            parse_mode="HTML",
+            reply_markup=SETTINGS_SUBMENU,
+        )
+        asyncio.create_task(delete_after(5, err))
+        return True
+
+    # Проверяем, что бот состоит в этом чате и чат доступен
+    try:
+        chat = await context.bot.get_chat(intro_chat_id)
+        # Дополнительно можно проверить тип чата (группа/супергруппа)
+        if chat.type not in ["group", "supergroup"]:
+            msg = await update.message.reply_text(
+                "❌ Указанный чат не является группой или супергруппой.",
+                reply_markup=SETTINGS_SUBMENU
+            )
+            asyncio.create_task(delete_after(5, msg))
+            return True
+    except TelegramError as e:
+        msg = await update.message.reply_text(
+            f"❌ Не удалось получить информацию о чате.\nОшибка: {e}",
+            reply_markup=SETTINGS_SUBMENU
+        )
+        asyncio.create_task(delete_after(5, msg))
+        return True
+
+    ok = set_intro_chat_id(intro_chat_id)
+    if ok:
+        msg = await update.message.reply_text(
+            f"✅ Чат знакомства установлен: <code>{intro_chat_id}</code> ({chat.title})",
+            parse_mode="HTML",
+            reply_markup=SETTINGS_SUBMENU,
+        )
+        asyncio.create_task(delete_after(3, msg))
+    else:
+        msg = await update.message.reply_text("❌ Не удалось сохранить настройку.", reply_markup=SETTINGS_SUBMENU)
+        asyncio.create_task(delete_after(5, msg))
+    return True
+
+async def handle_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает callback от настроек"""
+    query = update.callback_query
+    
+    # Всегда отвечаем Telegram, чтобы убрать "часики"
+    await query.answer()
+    
+    # Фильтруем только наши callback-запросы
+    if query.data not in [
+        "toggle_csv_setting",
+        "reset_settings",
+        "settings_back",
+        "settings_panel",
+        "introchat_set",
+        "introchat_reset",
+    ]:
+        return  # Пропускаем callback-запросы от других обработчиков
+    
+    user_id = query.from_user.id
+    
+    # Проверяем, что сообщение существует
+    if not query.message:
+        return
+    
+    if query.data == "toggle_csv_setting":
+        # Переключаем настройку CSV
+        settings = get_admin_settings(user_id)
+        if not settings:
+            await query.message.reply_text("❌ Ошибка: настройки не найдены")
+            return
+        
+        new_value = not settings.receive_csv
+        success = update_admin_settings(user_id, receive_csv=new_value)
+        
+        if success:
+            log_admin_action(
+                user_id=user_id,
+                action="csv_setting_toggled",
+                details=f"CSV настройка изменена на: {new_value}"
+            )
+            
+            # Обновляем панель настроек
+            await csv_settings_handler(update, context)
+            
+            # Подтверждение
+            confirm_msg = await query.message.reply_text(
+                f"✅ Настройка обновлена: {'Буду получать CSV файлы' if new_value else 'Не буду получать CSV файлы'}"
+            )
+            # Удаляем подтверждение через 3 секунды
+            asyncio.create_task(delete_after_3s(confirm_msg))
+        else:
+            await query.message.reply_text("❌ Ошибка при обновлении настроек")
+    
+    elif query.data == "reset_settings":
+        # Сброс всех настроек
+        success = update_admin_settings(user_id, receive_csv=False)
+        
+        if success:
+            log_admin_action(
+                user_id=user_id,
+                action="settings_reset",
+                details="Настройки сброшены"
+            )
+            
+            # Возвращаем в панель настроек
+            await csv_settings_handler(update, context)
+            
+            confirm_msg = await query.message.reply_text("✅ Все настройки сброшены")
+            asyncio.create_task(delete_after_3s(confirm_msg))
+        else:
+            await query.message.reply_text("❌ Ошибка при сбросе настроек")
+    
+    elif query.data == "settings_back":
+        # Возвращаем в меню настроек
+        # Используем импорт внутри функции чтобы избежать циклического импорта
+        from admin.menu import admin_menu
+        await admin_menu(update, context)
+
+    elif query.data == "settings_panel":
+        # Возврат в панель настроек
+        if query.message:
+            await query.message.reply_text(
+                "⚙️ <b>Настройки бота</b>\n\nВыберите раздел для настройки:",
+                reply_markup=SETTINGS_SUBMENU,
+                parse_mode="HTML",
+            )
+
+    elif query.data == "introchat_set":
+        if query.message:
+            context.user_data["awaiting_intro_chat_link"] = True
+            prompt = await query.message.reply_text(
+                "Пришлите ссылку на любое сообщение из чата знакомства.\n\n"
+                "Пример:\n<code>https://t.me/c/3849962819/2</code>",
+                parse_mode="HTML",
+            )
+            asyncio.create_task(delete_after(5, prompt))
+
+    elif query.data == "introchat_reset":
+        set_intro_chat_id(None)
+        if query.message:
+            msg = await query.message.reply_text("✅ Чат знакомства сброшен.", reply_markup=SETTINGS_SUBMENU)
+            asyncio.create_task(delete_after(3, msg))
+
+
+################################################################################
+# 9/39: admin/states.py
+################################################################################
+
+# admin/states.py
+"""Состояния диалогов админки — централизованное управление"""
+from telegram.ext import ConversationHandler
+
+# Диалог добавления темы (5 шагов)
+WAITING_LINK = 0
+WAITING_HASHTAG = 1
+WAITING_START_DATETIME = 2
+WAITING_END_DATETIME = 3
+WAITING_POINT_VALUE = 4
+EDIT_TOPIC_TIMEOUT = 20
+
+# Диалог редактирования темы
+EDIT_TOPIC_SELECT = 5
+EDIT_TOPIC_FIELD = 6
+EDIT_TOPIC_VALUE = 7
+
+# Диалог удаления темы
+DELETE_TOPIC_SELECT = 8
+DELETE_CONFIRM = 9
+
+# Конвертация в ConversationHandler.states
+ADD_TOPIC_STATES = {
+    WAITING_LINK: WAITING_LINK,
+    WAITING_HASHTAG: WAITING_HASHTAG,
+    WAITING_START_DATETIME: WAITING_START_DATETIME,
+    WAITING_END_DATETIME: WAITING_END_DATETIME,
+    WAITING_POINT_VALUE: WAITING_POINT_VALUE
+}
+
+EDIT_TOPIC_STATES = {
+    EDIT_TOPIC_SELECT: EDIT_TOPIC_SELECT,
+    EDIT_TOPIC_FIELD: EDIT_TOPIC_FIELD,
+    EDIT_TOPIC_VALUE: EDIT_TOPIC_VALUE,
+    EDIT_TOPIC_TIMEOUT: EDIT_TOPIC_TIMEOUT
+}
+
+DELETE_TOPIC_STATES = {
+    DELETE_TOPIC_SELECT: DELETE_TOPIC_SELECT,
+    DELETE_CONFIRM: DELETE_CONFIRM
+}
+
+
+################################################################################
+# 10/39: admin/stats.py
+################################################################################
+
+# admin/stats.py
+from telegram import Update
+from telegram.ext import ContextTypes
+from config import Config
+
+async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private" or update.effective_user.id not in Config.ADMIN_IDS:
+        return
+    await update.message.reply_text("📈 Статистика за сегодня:\n• Участников: 0\n• Хештегов: 0")
+
+
+################################################################################
+# 11/39: admin/timeout_utils.py
+################################################################################
+
+# admin/timeout_utils.py
+from datetime import datetime
+from telegram import Update
+from telegram.ext import ContextTypes, ConversationHandler
+from .keyboards import ADMIN_KEYBOARD
+import asyncio
+
+# ==================== КОНСТАНТЫ ТАЙМАУТА ====================
+TIMEOUT_SECONDS = 30
+
+# ==================== ФУНКЦИИ УПРАВЛЕНИЯ ТАЙМАУТАМИ ====================
+
+async def setup_timeout_job(update: Update, context: ContextTypes.DEFAULT_TYPE, 
+                           timeout_seconds: int = TIMEOUT_SECONDS):
+    """Устанавливает джобу для таймаута"""
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
+    # Удаляем предыдущий таймаут, если есть
+    if 'timeout_job' in context.user_data:
+        try:
+            context.user_data['timeout_job'].schedule_removal()
+        except:
+            pass
+    
+    # Создаем новую джобу
+    job = context.job_queue.run_once(
+        timeout_callback,
+        timeout_seconds,
+        chat_id=chat_id,
+        user_id=user_id,
+        name=f"timeout_{user_id}",
+        data={'chat_id': chat_id, 'user_id': user_id}
+    )
+    
+    context.user_data['timeout_job'] = job
+    context.user_data['last_activity'] = datetime.now().timestamp()
+
+async def reset_timeout_job(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                           timeout_seconds: int = TIMEOUT_SECONDS):
+    """Сбрасывает таймаут при активности пользователя"""
+    # Удаляем старую джобу
+    if 'timeout_job' in context.user_data:
+        try:
+            context.user_data['timeout_job'].schedule_removal()
+        except:
+            pass
+    
+    # Создаем новую
+    await setup_timeout_job(update, context, timeout_seconds)
+
+async def cleanup_timeout_job(context: ContextTypes.DEFAULT_TYPE):
+    """Очищает джобу таймаута"""
+    if 'timeout_job' in context.user_data:
+        try:
+            context.user_data['timeout_job'].schedule_removal()
+        except:
+            pass
+        del context.user_data['timeout_job']
+    
+    if 'last_activity' in context.user_data:
+        del context.user_data['last_activity']
+
+# ==================== КОЛЛБЭКИ И ОБРАБОТЧИКИ ====================
+
+async def timeout_callback(context: ContextTypes.DEFAULT_TYPE):
+    """Коллбэк при таймауте - возвращает в главное меню"""
+    job = context.job
+    chat_id = job.data.get('chat_id')
+    user_id = job.data.get('user_id')
+    
+    try:
+        # Отправляем сообщение о таймауте
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="⏰ Время на редактирование истекло. Возвращаю в главное меню.",
+            reply_markup=ADMIN_KEYBOARD
+        )
+        
+        # Очищаем данные
+        if 'timeout_job' in context.user_data:
+            del context.user_data['timeout_job']
+        if 'last_activity' in context.user_data:
+            del context.user_data['last_activity']
+        
+        # Завершаем ConversationHandler
+        return ConversationHandler.END
+    except Exception as e:
+        print(f"Ошибка в timeout_callback: {e}")
+
+async def edit_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмена редактирования (для fallback) - возвращает в главное меню"""
+    await cleanup_timeout_job(context)
+    
+    if update.callback_query:
+        await update.callback_query.message.reply_text(
+            "❌ Редактирование отменено",
+            reply_markup=ADMIN_KEYBOARD
+        )
+    elif update.message:
+        await update.message.reply_text(
+            "❌ Редактирование отменено",
+            reply_markup=ADMIN_KEYBOARD
+        )
+    
+    return ConversationHandler.END
+
+async def timeout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик для состояния таймаута в ConversationHandler"""
+    await cleanup_timeout_job(context)
+    
+    if update.message:
+        await update.message.reply_text(
+            "⏰ Время на редактирование истекло. Возвращаю в главное меню.",
+            reply_markup=ADMIN_KEYBOARD
+        )
+    
+    return ConversationHandler.END
+
+
+################################################################################
+# 12/39: admin/topic_add.py
+################################################################################
+
+# admin/topic_add.py
+import re
+import asyncio
+from datetime import datetime
+import pytz
+from telegram import Update, ReplyKeyboardRemove
+from telegram.ext import ContextTypes
+from db.database import SessionLocal
+from db.models import TopicRule
+from config import Config
+from utils.hashtag_utils import normalize_hashtag, validate_hashtag_prefix
+from utils.cleanup import delete_after_3s
+from .keyboards import ADMIN_KEYBOARD, TOPICS_SUBMENU
+
+async def request_topic_format(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    example = (
+        "📋 Отправьте данные темы одним сообщением в формате:\n\n"
+        "• Ссылка на тему: https://t.me/c/3849962819/2\n"
+        "• Начало: 05.02.2026 11:00\n"
+        "• Окончание: 05.02.2026 12:00\n"
+        "• Балл: 10\n"
+        "• Хештег: послевкусие_01"
+    )
+    await update.message.reply_text(example, reply_markup=ReplyKeyboardRemove())
+
+async def add_topic_single(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private" or update.effective_user.id not in Config.ADMIN_IDS:
+        return
+
+    # Если админ сейчас вводит ссылку для чата знакомства — обрабатываем это, а не парсим тему
+    try:
+        from admin.settings import handle_intro_chat_link_message
+        handled = await handle_intro_chat_link_message(update, context)
+        if handled:
+            return
+    except Exception:
+        # Не блокируем добавление темы, даже если что-то пошло не так в настройках
+        pass
+    
+    text = update.message.text.strip()
+    
+    # Парсинг данных
+    link_match = re.search(r'•\s*Ссылка на тему:\s*(https?://t\.me/c/(\d+)/(\d+))', text, re.IGNORECASE)
+    start_match = re.search(r'•\s*Начало:\s*(\d{2}\.\d{2}\.\d{4} \d{2}:\d{2})', text, re.IGNORECASE)
+    end_match = re.search(r'•\s*Окончание:\s*(\d{2}\.\d{2}\.\d{4} \d{2}:\d{2})', text, re.IGNORECASE)
+    point_match = re.search(r'•\s*Балл:\s*(\d+)', text, re.IGNORECASE)
+    hashtag_match = re.search(r'•\s*Хештег:\s*([^\n]+)', text, re.IGNORECASE)
+    
+    errors = []
+    if not link_match:
+        errors.append("❌ Не найдена ссылка на тему")
+    else:
+        chat_digits, thread_id = link_match.group(2), link_match.group(3)
+        if Config.ALLOWED_CHAT_IDS:
+            expected_digits = str(abs(Config.ALLOWED_CHAT_IDS[0]))[-10:]
+            if chat_digits != expected_digits:
+                errors.append(f"❌ Чат не совпадает! Ожидался: `{expected_digits}`")
+            else:
+                try:
+                    thread_id = int(thread_id)
+                except ValueError:
+                    errors.append("❌ Неверный формат ID темы")
+    
+    tz = pytz.timezone(Config.TIMEZONE)
+    
+    if not start_match:
+        errors.append("❌ Не указано время начала")
+    else:
+        try:
+            start_datetime = datetime.strptime(start_match.group(1), "%d.%m.%Y %H:%M")
+            start_datetime = tz.localize(start_datetime)
+        except ValueError:
+            errors.append("❌ Неверный формат даты начала (ожидается ДД.ММ.ГГГГ ЧЧ:ММ)")
+    
+    if not end_match:
+        errors.append("❌ Не указано время окончания")
+    else:
+        try:
+            end_datetime = datetime.strptime(end_match.group(1), "%d.%m.%Y %H:%M")
+            end_datetime = tz.localize(end_datetime)
+            
+            if 'start_datetime' in locals() and end_datetime < start_datetime:
+                errors.append("❌ Время окончания раньше начала")
+        except ValueError:
+            errors.append("❌ Неверный формат даты окончания (ожидается ДД.ММ.ГГГГ ЧЧ:ММ)")
+    
+    if not point_match:
+        errors.append("❌ Не указана стоимость балла")
+    else:
+        try:
+            point_value = int(point_match.group(1))
+            if point_value < 1:
+                errors.append("❌ Стоимость балла должна быть ≥ 1")
+        except ValueError:
+            errors.append("❌ Неверный формат балла")
+    
+    if not hashtag_match:
+        errors.append("❌ Не указан хештег")
+    else:
+        hashtag_prefix = normalize_hashtag(hashtag_match.group(1))
+        
+        is_valid, error_msg = validate_hashtag_prefix(hashtag_prefix)
+        
+        if not is_valid:
+            errors.append(f"❌ {error_msg}")
+    
+    if errors:
+        error_text = "⚠️ Ошибки валидации:\n" + "\n".join(errors) + "\n\nПопробуйте снова:"
+        await update.message.reply_text(error_text, reply_markup=ReplyKeyboardRemove())
+        return
+    
+    session = SessionLocal()
+    try:
+        # ПРОВЕРКА НА УНИКАЛЬНОСТЬ ХЕШТЕГА
+        # Проверяем, существует ли уже такой хештег в этом чате
+        existing_rule = session.query(TopicRule).filter_by(
+            chat_id=Config.ALLOWED_CHAT_IDS[0],
+            hashtag_prefix=hashtag_prefix
+        ).first()
+        
+        if existing_rule:
+            # Формируем информацию о существующей теме
+            start_str = existing_rule.start_datetime.strftime("%d.%m.%Y %H:%M") if existing_rule.start_datetime else "—"
+            end_str = existing_rule.end_datetime.strftime("%d.%m.%Y %H:%M") if existing_rule.end_datetime else "—"
+            
+            await update.message.reply_text(
+                f"❌ Хештег #{hashtag_prefix} уже существует!\n\n"
+                f"Информация о существующей теме:\n"
+                f"• ID темы: {existing_rule.thread_id}\n"
+                f"• Начало: {start_str}\n"
+                f"• Окончание: {end_str}\n"
+                f"• Балл: {existing_rule.point_value}\n"
+                f"• Статус: {'СТОП отправлен' if existing_rule.stop_sent else 'активна'}\n\n"
+                f"Используйте другой хештег.",
+                reply_markup=TOPICS_SUBMENU
+            )
+            return
+        
+        # Если хештег уникален, создаем правило
+        rule = TopicRule(
+            chat_id=Config.ALLOWED_CHAT_IDS[0],
+            thread_id=thread_id,
+            hashtag_prefix=hashtag_prefix,
+            start_datetime=start_datetime.replace(tzinfo=None) if start_datetime else None,
+            end_datetime=end_datetime.replace(tzinfo=None) if end_datetime else None,
+            point_value=point_value,
+            stop_sent=False
+        )
+        session.add(rule)
+        session.commit()
+        
+        response = (
+            "✅ Тема успешно добавлена!\n\n"
+            f"• Хештег: #{hashtag_prefix}\n"
+            f"• Тема: {thread_id}\n"
+            f"• Начало: {start_datetime.strftime('%d.%m.%Y %H:%M')}\n"
+            f"• Окончание: {end_datetime.strftime('%d.%m.%Y %H:%M')}\n"
+            f"• Балл: {point_value}"
+        )
+        await update.message.reply_text(response, reply_markup=ADMIN_KEYBOARD)
+    except Exception as e:
+        session.rollback()
+        await update.message.reply_text(f"❌ Ошибка сохранения: {e}", reply_markup=TOPICS_SUBMENU)
+    finally:
+        session.close()
+
+
+################################################################################
+# 13/39: admin/topic_delete.py
+################################################################################
+
+# admin/topic_delete.py
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import ContextTypes, ConversationHandler
+from db.database import SessionLocal
+from db.models import TopicRule
+from config import Config
+from .states import DELETE_TOPIC_SELECT, DELETE_CONFIRM
+from .keyboards import TOPICS_SUBMENU
+
+async def start_delete_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начало диалога удаления темы"""
+    if update.effective_chat.type != "private" or update.effective_user.id not in Config.ADMIN_IDS:
+        return ConversationHandler.END
+    
+    session = SessionLocal()
+    try:
+        rules = session.query(TopicRule).filter_by(chat_id=Config.ALLOWED_CHAT_IDS[0]).all()
+        if not rules:
+            await update.message.reply_text("📭 Нет тем для удаления", reply_markup=TOPICS_SUBMENU)
+            return ConversationHandler.END
+        
+        keyboard = [
+            [InlineKeyboardButton(f"#{r.hashtag_prefix} (тема {r.thread_id})", callback_data=f"delete_topic_{r.id}")]
+            for r in rules
+        ]
+        keyboard.append([InlineKeyboardButton("⬅️ Отмена", callback_data="delete_cancel")])
+        
+        await update.message.reply_text(
+            "🗑️ Выберите тему для удаления:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return DELETE_TOPIC_SELECT
+    finally:
+        session.close()
+
+async def delete_topic_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Выбор темы для удаления"""
+    query = update.callback_query
+    
+    # Проверяем, есть ли query
+    if not query:
+        return ConversationHandler.END
+    
+    await query.answer()
+    
+    if query.data == "delete_cancel":
+        # Проверяем, есть ли сообщение для редактирования
+        if query.message:
+            await query.message.edit_text("⏹️ Удаление отменено")
+        else:
+            # Отправляем новое сообщение в чат
+            await update.effective_chat.send_message("⏹️ Удаление отменено")
+        
+        from .menu import show_topics_submenu
+        await show_topics_submenu(update, context)
+        return ConversationHandler.END
+    
+    topic_id = int(query.data.split("_")[2])
+    context.user_data['delete_topic_id'] = topic_id
+    
+    session = SessionLocal()
+    try:
+        rule = session.query(TopicRule).filter_by(id=topic_id).first()
+        if not rule:
+            if query.message:
+                await query.message.edit_text("❌ Тема не найдена")
+            else:
+                await update.effective_chat.send_message("❌ Тема не найдена")
+            return ConversationHandler.END
+        
+        start_str = rule.start_datetime.strftime("%d.%m.%Y %H:%M") if rule.start_datetime else "—"
+        end_str = rule.end_datetime.strftime("%d.%m.%Y %H:%M") if rule.end_datetime else "—"
+        
+        text = (
+            f"⚠️ Вы уверены, что хотите удалить тему?\n\n"
+            f"• Хештег: #{rule.hashtag_prefix}\n"
+            f"• ID темы: {rule.thread_id}\n"
+            f"• Начало: {start_str}\n"
+            f"• Окончание: {end_str}\n"
+            f"• Балл: {rule.point_value}\n\n"
+            f"Это действие нельзя отменить!"
+        )
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Да, удалить", callback_data=f"confirm_delete_{topic_id}"),
+                InlineKeyboardButton("❌ Нет, отмена", callback_data=f"confirm_cancel_{topic_id}")
+            ]
+        ]
+        
+        if query.message:
+            await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        else:
+            await update.effective_chat.send_message(
+                text, 
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        
+        return DELETE_CONFIRM
+    finally:
+        session.close()
+
+async def confirm_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Подтверждение удаления"""
+    query = update.callback_query
+    
+    # Проверяем, есть ли query
+    if not query:
+        return ConversationHandler.END
+    
+    await query.answer()
+    
+    if "cancel" in query.data:
+        # Проверяем, есть ли сообщение для редактирования
+        if query.message:
+            await query.message.edit_text("⏹️ Удаление отменено")
+        else:
+            await update.effective_chat.send_message("⏹️ Удаление отменено")
+        
+        from .menu import show_topics_submenu
+        await show_topics_submenu(update, context)
+        return ConversationHandler.END
+    
+    topic_id = int(query.data.split("_")[2])
+    
+    session = SessionLocal()
+    try:
+        rule = session.query(TopicRule).filter_by(id=topic_id).first()
+        if not rule:
+            if query.message:
+                await query.message.edit_text("❌ Тема не найдена")
+            else:
+                await update.effective_chat.send_message("❌ Тема не найдена")
+            return ConversationHandler.END
+        
+        hashtag = rule.hashtag_prefix
+        thread_id = rule.thread_id
+        
+        session.delete(rule)
+        session.commit()
+        
+        success_text = f"✅ Тема #{hashtag} (ID: {thread_id}) успешно удалена!"
+        
+        if query.message:
+            await query.message.edit_text(success_text)
+        else:
+            await update.effective_chat.send_message(success_text)
+        
+        # Возвращаемся в меню тем
+        from .menu import show_topics_submenu
+        await show_topics_submenu(update, context)
+        
+        return ConversationHandler.END
+    except Exception as e:
+        session.rollback()
+        error_text = f"❌ Ошибка при удалении: {e}"
+        
+        if query.message:
+            await query.message.edit_text(error_text)
+        else:
+            await update.effective_chat.send_message(error_text)
+        
+        return ConversationHandler.END
+    finally:
+        session.close()
+
+
+################################################################################
+# 14/39: admin/topic_edit.py
+################################################################################
+
+# admin/topic_edit.py
+from datetime import datetime
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import ContextTypes, ConversationHandler
+from db.database import SessionLocal
+from db.models import TopicRule
+from config import Config
+from utils.hashtag_utils import normalize_hashtag, validate_hashtag_prefix
+from utils.cleanup import delete_after_3s
+from .states import EDIT_TOPIC_SELECT, EDIT_TOPIC_FIELD, EDIT_TOPIC_VALUE
+from .keyboards import TOPICS_SUBMENU, ADMIN_KEYBOARD
+from .timeout_utils import (
+    setup_timeout_job, reset_timeout_job, cleanup_timeout_job,
+    timeout_callback, edit_cancel, timeout_handler, TIMEOUT_SECONDS
+)
+import asyncio
+
+# ==================== ОСНОВНЫЕ ФУНКЦИИ РЕДАКТИРОВАНИЯ ====================
+
+async def show_edit_topics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает список тем для редактирования"""
+    if update.effective_chat.type != "private" or update.effective_user.id not in Config.ADMIN_IDS:
+        return ConversationHandler.END
+    
+    session = SessionLocal()
+    try:
+        rules = session.query(TopicRule).filter_by(chat_id=Config.ALLOWED_CHAT_IDS[0]).all()
+        if not rules:
+            await update.message.reply_text("📭 Нет тем для редактирования", reply_markup=TOPICS_SUBMENU)
+            return ConversationHandler.END
+        
+        keyboard = []
+        for rule in rules:
+            start_str = rule.start_datetime.strftime("%d.%m.%Y %H:%M") if rule.start_datetime else "—"
+            end_str = rule.end_datetime.strftime("%d.%m.%Y %H:%M") if rule.end_datetime else "—"
+            btn_text = f"#{rule.hashtag_prefix} (тема {rule.thread_id})"
+            keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"edit_topic_{rule.id}")])
+        
+        keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="edit_cancel")])
+        
+        await update.message.reply_text(
+            "✏️ Выберите тему для редактирования:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return EDIT_TOPIC_SELECT
+    finally:
+        session.close()
+
+async def edit_topic_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает выбор темы для редактирования"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "edit_cancel":
+        await query.message.edit_text("⏹️ Редактирование отменено")
+        from .menu import show_topics_submenu
+        await show_topics_submenu(update, context)
+        return ConversationHandler.END
+    
+    topic_id = int(query.data.split("_")[2])
+    context.user_data['editing_topic_id'] = topic_id
+    
+    # Устанавливаем таймаут
+    await setup_timeout_job(update, context, TIMEOUT_SECONDS)
+    
+    # Показываем поля для редактирования
+    keyboard = [
+        [
+            InlineKeyboardButton("📝 Хештег", callback_data="edit_field_hashtag"),
+            InlineKeyboardButton("🕐 Начало", callback_data="edit_field_start_datetime"),
+        ],
+        [
+            InlineKeyboardButton("🕐 Окончание", callback_data="edit_field_end_datetime"),
+            InlineKeyboardButton("⭐ Балл", callback_data="edit_field_point_value"),
+        ],
+        [
+            InlineKeyboardButton("⬅️ Назад", callback_data="edit_back"),
+            InlineKeyboardButton("❌ Отмена", callback_data="edit_cancel"),
+        ]
+    ]
+    
+    session = SessionLocal()
+    try:
+        rule = session.query(TopicRule).filter_by(id=topic_id).first()
+        if rule:
+            start_str = rule.start_datetime.strftime("%d.%m.%Y %H:%M") if rule.start_datetime else "—"
+            end_str = rule.end_datetime.strftime("%d.%m.%Y %H:%M") if rule.end_datetime else "—"
+            
+            text = (
+                f"✏️ Редактирование темы:\n"
+                f"• Хештег: #{rule.hashtag_prefix}\n"
+                f"• Тема ID: {rule.thread_id}\n"
+                f"• Начало: {start_str}\n"
+                f"• Окончание: {end_str}\n"
+                f"• Балл: {rule.point_value}\n\n"
+                f"Выберите поле для редактирования:"
+            )
+            
+            await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+            return EDIT_TOPIC_FIELD
+        else:
+            await query.message.edit_text("❌ Тема не найдена")
+            return ConversationHandler.END
+    finally:
+        session.close()
+
+async def edit_topic_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает выбор поля для редактирования"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "edit_back":
+        # Возвращаемся к выбору темы
+        await cleanup_timeout_job(context)
+        return await show_edit_topics(update, context)
+    
+    if query.data == "edit_cancel":
+        await cleanup_timeout_job(context)
+        await query.message.edit_text("⏹️ Редактирование отменено")
+        from .menu import show_topics_submenu
+        await show_topics_submenu(update, context)
+        return ConversationHandler.END
+    
+    # Извлекаем название поля
+    field = query.data.replace("edit_field_", "")
+    context.user_data['editing_field'] = field
+    
+    # Обновляем таймаут
+    await reset_timeout_job(update, context, TIMEOUT_SECONDS)
+    
+    # Запрашиваем новое значение
+    if field == "hashtag":
+        prompt = "Введите новый хештег (без #):"
+    elif field in ("start_datetime", "end_datetime"):
+        prompt = "Введите дату и время в формате ДД.ММ.ГГГГ ЧЧ:ММ\n(или отправьте 0, чтобы удалить время):"
+    elif field == "point_value":
+        prompt = "Введите новую стоимость балла (целое число ≥ 1):"
+    else:
+        prompt = f"Введите новое значение для {field}:"
+    
+    await query.message.edit_text(prompt)
+    return EDIT_TOPIC_VALUE
+
+async def edit_topic_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает ввод нового значения для поля"""
+    if update.effective_user.id not in Config.ADMIN_IDS:
+        await cleanup_timeout_job(context)
+        return ConversationHandler.END
+    
+    value = update.message.text.strip()
+    field = context.user_data.get('editing_field')
+    topic_id = context.user_data.get('editing_topic_id')
+    
+    if not field or not topic_id:
+        await cleanup_timeout_job(context)
+        await update.message.reply_text("❌ Ошибка сессии", reply_markup=TOPICS_SUBMENU)
+        return ConversationHandler.END
+    
+    session = SessionLocal()
+    try:
+        rule = session.query(TopicRule).filter_by(id=topic_id).first()
+        if not rule:
+            await cleanup_timeout_job(context)
+            await update.message.reply_text("❌ Тема не найдена", reply_markup=TOPICS_SUBMENU)
+            return ConversationHandler.END
+        
+        if field == "hashtag":
+            # Используем единую функцию нормализации
+            prefix = normalize_hashtag(value)
+            
+            # Проверяем валидность хештега
+            is_valid, warning = validate_hashtag_prefix(prefix)
+            
+            if not is_valid:
+                await update.message.reply_text(f"❌ {warning}\n\nПопробуйте снова:")
+                await reset_timeout_job(update, context, TIMEOUT_SECONDS)
+                return EDIT_TOPIC_VALUE
+            
+            # Если есть предупреждение, показываем его
+            if warning:
+                warning_msg = await update.message.reply_text(f"⚠️ {warning}")
+                asyncio.create_task(delete_after_3s(warning_msg))
+            
+            rule.hashtag_prefix = prefix
+            msg_text = f"✅ Хештег изменён на #{prefix}"
+        
+        elif field in ("start_datetime", "end_datetime"):
+            dt_value = None
+            if value != "0":
+                try:
+                    dt_value = datetime.strptime(value, "%d.%m.%Y %H:%M")
+                except ValueError:
+                    await update.message.reply_text(
+                        "❌ Неверный формат. Попробуйте снова:\n"
+                        "Формат: `ДД.ММ.ГГГГ ЧЧ:ММ`\n"
+                        "Или отправьте 0, чтобы удалить время:"
+                    )
+                    await reset_timeout_job(update, context, TIMEOUT_SECONDS)
+                    return EDIT_TOPIC_VALUE
+            setattr(rule, field, dt_value)
+            msg_text = f"✅ {'Начало' if field == 'start_datetime' else 'Окончание'} установлено: {value if value != '0' else 'удалено'}"
+        
+        elif field == "point_value":
+            try:
+                points = int(value)
+                if points < 1:
+                    raise ValueError
+                rule.point_value = points
+                msg_text = f"✅ Стоимость балла установлена: {points}"
+            except ValueError:
+                await update.message.reply_text("❌ Введите целое число ≥ 1:")
+                await reset_timeout_job(update, context, TIMEOUT_SECONDS)
+                return EDIT_TOPIC_VALUE
+        else:
+            await cleanup_timeout_job(context)
+            await update.message.reply_text("❌ Неизвестное поле", reply_markup=TOPICS_SUBMENU)
+            return ConversationHandler.END
+        
+        session.commit()
+        await cleanup_timeout_job(context)
+        await update.message.reply_text(msg_text, reply_markup=TOPICS_SUBMENU)
+        return ConversationHandler.END
+    
+    except Exception as e:
+        session.rollback()
+        await cleanup_timeout_job(context)
+        await update.message.reply_text(f"❌ Ошибка: {e}", reply_markup=TOPICS_SUBMENU)
+        return ConversationHandler.END
+    finally:
+        session.close()
+
+
+################################################################################
+# 15/39: admin/topics_list.py
+################################################################################
+
+# admin/topics_list.py
+from telegram import Update
+from telegram.ext import ContextTypes
+from db.database import SessionLocal
+from db.models import TopicRule
+from config import Config
+
+async def list_topics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private" or update.effective_user.id not in Config.ADMIN_IDS:
+        return
+    
+    session = SessionLocal()
+    try:
+        rules = session.query(TopicRule).filter_by(chat_id=Config.ALLOWED_CHAT_IDS[0]).all()
+        if not rules:
+            await update.message.reply_text("📭 Нет тем")
+            return
+        
+        text = "📋 Темы:\n"
+        for rule in rules:
+            start_str = rule.start_datetime.strftime("%d.%m.%Y %H:%M") if rule.start_datetime else "—"
+            end_str = rule.end_datetime.strftime("%d.%m.%Y %H:%M") if rule.end_datetime else "—"
+            text += (
+                f"• #{rule.hashtag_prefix} — тема {rule.thread_id}\n"
+                f"  Начало: {start_str}\n"
+                f"  Окончание: {end_str}\n"
+                f"  Балл: {rule.point_value}\n\n"
+            )
+        await update.message.reply_text(text)
+    finally:
+        session.close()
+
+
+################################################################################
+# 16/39: check_table.py
+################################################################################
+
+# check_table.py
+from db.database import SessionLocal, engine
+from sqlalchemy import inspect
+
+def check_admin_table():
+    """Проверяет, существует ли таблица admin_settings"""
+    inspector = inspect(engine)
+    
+    tables = inspector.get_table_names()
+    print(f"📋 Таблицы в базе данных: {tables}")
+    
+    if 'admin_settings' in tables:
+        print("✅ Таблица admin_settings существует")
+        
+        # Проверяем структуру таблицы
+        columns = inspector.get_columns('admin_settings')
+        print("📝 Структура таблицы admin_settings:")
+        for col in columns:
+            print(f"  - {col['name']}: {col['type']}")
+        
+        # Проверяем есть ли записи
+        session = SessionLocal()
+        try:
+            count = session.query(AdminSettings).count()
+            print(f"📊 Записей в таблице: {count}")
+            
+            if count > 0:
+                records = session.query(AdminSettings).limit(5).all()
+                for record in records:
+                    print(f"  👤 user_id: {record.user_id}, receive_csv: {record.receive_csv}")
+        finally:
+            session.close()
+    else:
+        print("❌ Таблица admin_settings не существует")
+
+if __name__ == "__main__":
+    check_admin_table()
+
+
+################################################################################
+# 17/39: config.py
+################################################################################
+
+# config.py
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+class Config:
+    BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+    DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///maraphon.db")
+    TIMEZONE = os.getenv("TIMEZONE", "Europe/Moscow")
+    ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
+    ALLOWED_CHAT_IDS = [int(x.strip()) for x in os.getenv("ALLOWED_CHAT_IDS", "").split(",") if x.strip()]
+    
+    # Настройки времени
+    DELETE_ERROR_AFTER = 3    # секунды для ошибок
+    DELETE_SUCCESS_AFTER = 5  # секунды для успешных действий
+
+# Валидация при импорте
+if not Config.BOT_TOKEN:
+    raise ValueError("❌ TELEGRAM_BOT_TOKEN не задан в .env")
+if not Config.ALLOWED_CHAT_IDS:
+    raise ValueError("❌ ALLOWED_CHAT_IDS не задан в .env")
+if not Config.ADMIN_IDS:
+    raise ValueError("❌ ADMIN_IDS не задан в .env")
+
+
+################################################################################
+# 18/39: create_admin_table.py
+################################################################################
+
+# create_admin_table.py
+from db.database import engine, Base
+from db.models import AdminSettings, User, Hashtag, Action, TopicRule
+from config import Config
+
+def create_admin_settings_table():
+    """Создает таблицу для настроек администратора"""
+    try:
+        # Создаем все таблицы, включая AdminSettings
+        Base.metadata.create_all(bind=engine)
+        print("✅ Все таблицы созданы/уже существуют")
+        
+        # Проверяем администраторов из config
+        print(f"📋 Администраторы из config: {Config.ADMIN_IDS}")
+        
+        if not Config.ADMIN_IDS:
+            print("⚠️  Внимание: ADMIN_IDS пустой в config.py")
+            print(f"   Проверьте файл .env: ADMIN_IDS={Config.ADMIN_IDS}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Ошибка при создании таблиц: {e}")
+        return False
+
+if __name__ == "__main__":
+    create_admin_settings_table()
+
+
+################################################################################
+# 19/39: db/__init__.py
+################################################################################
+
+
+
+
+################################################################################
+# 20/39: db/database.py
+################################################################################
+
+# db/database.py
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.exc import SQLAlchemyError
+from contextlib import contextmanager
+from .models import Base
+import logging
+
+logger = logging.getLogger(__name__)
+
+engine = create_engine(
+    "sqlite:///maraphon.db",
+    connect_args={"check_same_thread": False},
+    echo=False  # Включить для отладки SQL
+)
+
+Base.metadata.create_all(engine)
+SessionLocal = sessionmaker(bind=engine)
+
+@contextmanager
+def get_db_session():
+    """Контекстный менеджер для сессий БД"""
+    session = SessionLocal()
+    try:
+        yield session
+        session.commit()
+    except SQLAlchemyError as e:
+        session.rollback()
+        logger.error(f"Database error: {e}")
+        raise
+    finally:
+        session.close()
+
+
+################################################################################
+# 21/39: db/models.py
+################################################################################
+
+# db/models.py
+from sqlalchemy import (
+    Column, Integer, BigInteger, String, DateTime,
+    Boolean, ForeignKey, func
+)
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import relationship
+
+Base = declarative_base()
+
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True)
+    uid = Column(BigInteger, unique=True, nullable=False)
+    username = Column(String)
+    name = Column(String)
+    fam = Column(String)
+    city = Column(String)
+    datetime = Column(DateTime, default=func.now())
+
+class Hashtag(Base):
+    __tablename__ = "hashtags"
+    id = Column(Integer, primary_key=True)
+    name_hashtag = Column(String, unique=True, nullable=False)
+
+class Action(Base):
+    __tablename__ = "actions"
+    id = Column(Integer, primary_key=True)
+    uid = Column(BigInteger, ForeignKey("users.uid"), nullable=False)
+    pid = Column(BigInteger, nullable=False)
+    hashtag_id = Column(Integer, ForeignKey("hashtags.id"), nullable=False)
+    datetime = Column(DateTime, default=func.now())
+
+class TopicRule(Base):
+    __tablename__ = "topic_rules"
+    id = Column(Integer, primary_key=True)
+    chat_id = Column(BigInteger, nullable=False)
+    thread_id = Column(BigInteger, nullable=False)
+    hashtag_prefix = Column(String, nullable=False)
+    start_datetime = Column(DateTime, nullable=True)
+    end_datetime = Column(DateTime, nullable=True)
+    point_value = Column(Integer, default=1)
+    stop_sent = Column(Boolean, default=False)
+
+class AdminSettings(Base):
+    __tablename__ = "admin_settings"
+    
+    user_id = Column(BigInteger, primary_key=True)
+    receive_csv = Column(Boolean, default=False)  # Получать CSV файлы
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+# db/models.py - дополните
+class AdminInvite(Base):
+    __tablename__ = "admin_invites"
+    
+    id = Column(Integer, primary_key=True)
+    token = Column(String, unique=True, nullable=False, index=True)
+    created_by = Column(BigInteger, nullable=False)  # ID администратора, создавшего ссылку
+    created_at = Column(DateTime, default=func.now())
+    expires_at = Column(DateTime, nullable=False)     # Время истечения
+    max_uses = Column(Integer, default=1)            # Максимальное количество использований (1 для одноразовых)
+    used_count = Column(Integer, default=0)          # Сколько раз использовано
+    is_active = Column(Boolean, default=True)
+    
+    # Связь с пользователями, которые использовали токен
+    used_by = relationship("AdminInviteUsage", back_populates="invite")
+
+class AdminInviteUsage(Base):
+    __tablename__ = "admin_invite_usage"
+    
+    id = Column(Integer, primary_key=True)
+    invite_id = Column(Integer, ForeignKey("admin_invites.id"))
+    used_by = Column(BigInteger, nullable=False)     # ID пользователя, который использовал токен
+    used_at = Column(DateTime, default=func.now())
+    
+    invite = relationship("AdminInvite", back_populates="used_by")
+
+
+class BotSettings(Base):
+    __tablename__ = "bot_settings"
+
+    id = Column(Integer, primary_key=True)  # всегда 1
+    intro_chat_id = Column(BigInteger, nullable=True)  # чат "Знакомство"
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+
+################################################################################
+# 22/39: export_code.py
+################################################################################
+
+#!/usr/bin/env python3
+import sys
+from pathlib import Path
+from datetime import datetime
+
+def export_py_files(root_dir=".", output_file="codebase_export.txt"):
+    EXCLUDE_DIRS = {
+        '__pycache__', '.git', '.venv', 'venv', 'env', 'ENV',
+        '.vscode', '.idea', 'node_modules', 'dist', 'build',
+        '.mypy_cache', '.pytest_cache', '.ruff_cache', '.tox',
+        'site-packages', '.eggs', '.pytest_cache', '.DS_Store'
+    }
+    EXCLUDE_FILES = {'export_codebase.py', 'get-pip.py'}
+    
+    root = Path(root_dir).resolve()
+    output_path = root / output_file
+    
+    py_files = []
+    for path in root.rglob("*.py"):
+        # Исключаем по директориям
+        if any(part in EXCLUDE_DIRS for part in path.relative_to(root).parts[:-1]):
+            continue
+        # Исключаем по имени файла
+        if path.name in EXCLUDE_FILES:
+            continue
+        py_files.append(path)
+    
+    py_files.sort()
+    
+    with open(output_path, 'w', encoding='utf-8') as f_out:
+        f_out.write(f"{'='*80}\n")
+        f_out.write(f"Python Code Export\n")
+        f_out.write(f"Root: {root}\n")
+        f_out.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f_out.write(f"Files: {len(py_files)}\n")
+        f_out.write(f"{'='*80}\n\n")
+        
+        for i, filepath in enumerate(py_files, 1):
+            rel_path = filepath.relative_to(root)
+            f_out.write(f"\n{'#'*80}\n")
+            f_out.write(f"# {i}/{len(py_files)}: {rel_path}\n")
+            f_out.write(f"{'#'*80}\n\n")
+            try:
+                content = filepath.read_text(encoding='utf-8')
+                f_out.write(content)
+                if not content.endswith('\n'):
+                    f_out.write('\n')
+            except Exception as e:
+                f_out.write(f"# ERROR: {type(e).__name__} - {e}\n")
+            f_out.write('\n')
+    
+    print(f"✅ Экспортировано {len(py_files)} .py файлов → {output_path}")
+    print(f"📊 Размер: {output_path.stat().st_size / 1024:.1f} КБ")
+
+if __name__ == "__main__":
+    root = sys.argv[1] if len(sys.argv) > 1 else "."
+    out_file = sys.argv[2] if len(sys.argv) > 2 else "code_export.txt"
+    export_py_files(root, out_file)
+
+
+################################################################################
+# 23/39: init_admin_settings.py
+################################################################################
+
+# init_admin_settings.py
+from db.database import SessionLocal
+from db.models import AdminSettings
+from config import Config
+
+def init_admin_settings():
+    """Инициализирует настройки для всех администраторов"""
+    session = SessionLocal()
+    
+    try:
+        initialized = 0
+        existing = 0
+        
+        for admin_id in Config.ADMIN_IDS:
+            # Проверяем, существует ли уже запись
+            settings = session.query(AdminSettings).filter_by(user_id=admin_id).first()
+            
+            if not settings:
+                # Создаем новую запись
+                settings = AdminSettings(
+                    user_id=admin_id,
+                    receive_csv=False  # По умолчанию выключено
+                )
+                session.add(settings)
+                initialized += 1
+                print(f"✅ Созданы настройки для администратора {admin_id}")
+            else:
+                existing += 1
+                print(f"ℹ️  Настройки для администратора {admin_id} уже существуют")
+        
+        session.commit()
+        print(f"\n📊 Итог: создано {initialized}, уже было {existing}")
+        
+    except Exception as e:
+        session.rollback()
+        print(f"❌ Ошибка при инициализации: {e}")
+    finally:
+        session.close()
+
+if __name__ == "__main__":
+    if not Config.ADMIN_IDS:
+        print("⚠️  Внимание: ADMIN_IDS пустой. Проверьте .env файл")
+    else:
+        print(f"📋 Найдено администраторов: {len(Config.ADMIN_IDS)}")
+        init_admin_settings()
+
+
+################################################################################
+# 24/39: init_db.py
+################################################################################
+
+# init_db.py
+from db.database import engine, Base
+from db.models import (
+    User, Hashtag, Action, TopicRule, 
+    AdminSettings, AdminInvite, AdminInviteUsage
+)
+from config import Config
+
+def init_database():
+    """Инициализирует базу данных, создавая все таблицы"""
+    try:
+        # Создаем все таблицы
+        Base.metadata.create_all(bind=engine)
+        print("✅ Все таблицы созданы/уже существуют")
+        
+        # Проверяем администраторов
+        if Config.ADMIN_IDS:
+            print(f"📋 Суперадминистраторы из .env: {Config.ADMIN_IDS}")
+        else:
+            print("⚠️  ADMIN_IDS пустой в config.py")
+        
+        # Проверяем таблицы
+        from sqlalchemy import inspect
+        inspector = inspect(engine)
+        tables = inspector.get_table_names()
+        
+        print("\n📊 Созданные таблицы:")
+        for table in sorted(tables):
+            columns = inspector.get_columns(table)
+            print(f"  - {table}: {len(columns)} колонок")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Ошибка при создании таблиц: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+if __name__ == "__main__":
+    init_database()
+
+
+################################################################################
+# 25/39: main.py
+################################################################################
+
+# main.py
+from telegram import ReplyKeyboardMarkup
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler,
+    ConversationHandler, filters, CallbackQueryHandler
+)
+from config import Config
+
+# Отключаем ВСЁ лишнее
+import warnings
+warnings.filterwarnings("ignore")
+import logging
+
+# Отключаем лишние логи, оставляем только INFO и выше для основного логгера
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("telegram.ext").setLevel(logging.WARNING)
+
+# Включаем логирование для нашего бота
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+
+# Импорты
+from admin.menu import admin_menu, show_topics_submenu
+from admin.topics_list import list_topics
+from admin.topic_add import request_topic_format, add_topic_single
+from admin.topic_edit import (
+    show_edit_topics, edit_topic_select, edit_topic_field, 
+    edit_topic_value, edit_cancel, timeout_handler
+)
+from admin.topic_delete import (
+    start_delete_topic, delete_topic_select, confirm_delete
+)
+from admin.stats import stats_handler
+from admin.settings import (
+    show_settings_panel,
+    csv_settings_handler,
+    handle_settings_callback,
+    intro_chat_settings_handler,
+)  # ← Используем show_settings_panel
+from admin.admin_manager import show_admin_management, admin_management_callback, handle_invite_token
+from admin.schedule import schedule_handler, schedule_callback
+from admin.states import (
+    EDIT_TOPIC_SELECT, EDIT_TOPIC_FIELD, EDIT_TOPIC_VALUE,
+    DELETE_TOPIC_SELECT, DELETE_CONFIRM
+)
+from user.message_handler import handle_message
+from utils.stop_daemon import setup_stop_daemon
+
+# Новая функция для обработки команды /start с инвайтами
+async def start_command(update, context):
+    """Обработчик команды /start с поддержкой инвайт-токенов"""
+    # Проверяем аргументы команды /start
+    args = context.args
+    
+    if args and args[0].startswith('admin_'):
+        # Пользователь перешел по инвайт-ссылке
+        token = args[0].replace('admin_', '')  # Убираем префикс 'admin_'
+        user_id = update.effective_user.id
+        
+        # Обрабатываем токен
+        success, message = await handle_invite_token(user_id, token, context)
+        
+        # Отправляем результат пользователю
+        await update.message.reply_text(message, parse_mode='HTML')
+        
+        # Если успешно добавлен как администратор, показываем админ-меню
+        if success:
+            await admin_menu(update, context)
+    else:
+        # Обычный запуск /start - показываем админ-меню
+        await admin_menu(update, context)
+
+def main():
+    """Основная функция запуска бота"""
+    # Проверка конфигурации
+    if not Config.BOT_TOKEN:
+        raise ValueError("BOT_TOKEN не задан")
+    if not Config.ALLOWED_CHAT_IDS:
+        raise ValueError("ALLOWED_CHAT_IDS не задан")
+    if not Config.ADMIN_IDS:
+        raise ValueError("ADMIN_IDS не задан")
+    
+    # Создание приложения
+    app = Application.builder().token(Config.BOT_TOKEN).build()
+
+    # Запуск систем (БЕЗ ЛОГОВ О ЗАПУСКЕ)
+    stop_daemon = setup_stop_daemon(app)
+    if stop_daemon:
+        print("✅ Демон точных СТОП запущен")
+    else:
+        print("❌ Демон СТОП не запустился")
+
+    # ConversationHandler для редактирования тем
+    edit_conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^✏️ Редактировать$"), show_edit_topics)],
+        states={
+            EDIT_TOPIC_SELECT: [
+                CallbackQueryHandler(edit_topic_select, pattern=r"^edit_(topic_\d+|cancel)$")
+            ],
+            EDIT_TOPIC_FIELD: [
+                CallbackQueryHandler(edit_topic_field, pattern=r"^edit_(field_.+|back|cancel)$")
+            ],
+            EDIT_TOPIC_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_topic_value)],
+        },
+        fallbacks=[
+            CommandHandler("cancel", edit_cancel),
+            MessageHandler(filters.Regex("^(⬅️ Назад|❌ Отмена)$"), edit_cancel),
+            MessageHandler(filters.TEXT, timeout_handler)
+        ],
+        conversation_timeout=30,
+        per_message=False,
+        allow_reentry=True,
+    )
+    
+    # ConversationHandler для удаления тем
+    delete_conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^🗑️ Удалить$"), start_delete_topic)],
+        states={
+            DELETE_TOPIC_SELECT: [
+                CallbackQueryHandler(delete_topic_select, pattern=r"^(delete_topic_\d+|delete_cancel)$")
+            ],
+            DELETE_CONFIRM: [
+                CallbackQueryHandler(confirm_delete, pattern=r"^(confirm_delete_\d+|confirm_cancel_\d+)$")
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", lambda u, c: ConversationHandler.END),
+            MessageHandler(filters.Regex("^⬅️ Назад$"), lambda u, c: ConversationHandler.END)
+        ],
+        per_message=False,
+        allow_reentry=True,
+    )
+    
+    # Регистрация обработчиков
+    app.add_handler(CommandHandler("start", start_command))  # Используем новую функцию
+    app.add_handler(CommandHandler("admin", admin_menu))
+    
+    # Главное меню
+    app.add_handler(MessageHandler(filters.Regex("^📋 Темы$"), show_topics_submenu))
+    app.add_handler(MessageHandler(filters.Regex("^📊 Статистика$"), stats_handler))
+    app.add_handler(MessageHandler(filters.Regex("^📅 Расписание$"), schedule_handler))
+    
+    # Настройки - показываем подменю
+    app.add_handler(MessageHandler(filters.Regex("^⚙️ Настройка$"), show_settings_panel))
+    
+    # Подменю настроек
+    app.add_handler(MessageHandler(filters.Regex("^📁 CSV отчеты$"), csv_settings_handler))
+    app.add_handler(MessageHandler(filters.Regex("^👋 Чат знакомства$"), intro_chat_settings_handler))
+    app.add_handler(MessageHandler(filters.Regex("^👥 Админы$"), show_admin_management))
+    
+    # Темы
+    app.add_handler(MessageHandler(filters.Regex("^👁️ Список тем$"), list_topics))
+    app.add_handler(MessageHandler(filters.Regex("^➕ Добавить$"), request_topic_format))
+    app.add_handler(delete_conv)
+    
+    # Обработчик редактирования
+    app.add_handler(edit_conv)
+    
+    # Навигация (исправленные регулярные выражения)
+    app.add_handler(MessageHandler(filters.Regex("^(⬅️ Назад в меню|⬅️ Назад)$"), admin_menu))
+    app.add_handler(MessageHandler(filters.Regex("^⬅️ Назад к настройкам$"), show_settings_panel))
+    app.add_handler(MessageHandler(filters.Regex("^⬅️ Назад к управлению админами$"), show_admin_management))
+    
+    # Обработка добавления тем
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, add_topic_single))
+    
+    # Обработка сообщений в чатах (внутри handle_message есть строгая фильтрация по нужным chat_id)
+    app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, handle_message))
+    
+    # Регистрируем обработчики callback для настроек, расписания и управления админами
+    app.add_handler(CallbackQueryHandler(handle_settings_callback))  # Без паттерна, фильтруем внутри функции
+    
+    app.add_handler(CallbackQueryHandler(schedule_callback, pattern="^schedule_"))
+    app.add_handler(CallbackQueryHandler(admin_management_callback, pattern="^admin_"))
+    
+    # Чистый запуск
+    print("=" * 60)
+    print("🚀 Maraphon Bot запущен")
+    print("👥 Система инвайт-ссылок для админов активирована")
+    print("📅 СТОП будет отправляться секунда в секунду по окончанию времени")
+    print("=" * 60)
+    
+    app.run_polling(drop_pending_updates=True)
+
+if __name__ == "__main__":
+    main()
+
+
+################################################################################
+# 26/39: test_.py
+################################################################################
+
+# test_callback_fixed.py
+import sys
+sys.path.append('.')
+
+from telegram.ext import CallbackQueryHandler
+from admin.settings import handle_settings_callback
+
+# Создаем обработчик БЕЗ паттерна
+handler = CallbackQueryHandler(handle_settings_callback)
+
+print(f"✅ Обработчик создан: {handler}")
+print(f"📋 Тип обработчика: {handler.__class__.__name__}")
+
+# Тестовая функция для проверки check_update
+def test_check_update(data_str):
+    """Тестируем, как обработчик реагирует на данные"""
+    # Создаем структуру, похожую на реальный callback
+    update_dict = {
+        'update_id': 123456,
+        'callback_query': {
+            'id': 'test_id',
+            'from': {'id': 90299004, 'first_name': 'Test'},
+            'message': {'message_id': 111, 'chat': {'id': 90299004}},
+            'data': data_str
+        }
+    }
+    
+    try:
+        # Метод check_update вернет либо объект для обработки, либо None
+        result = handler.check_update(update_dict)
+        return result is not None
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
+        return False
+
+# Тестируем наши callback данные
+test_data = [
+    "toggle_csv_setting",
+    "reset_settings", 
+    "settings_back",
+    "edit_topic_123",  # Должен быть пропущен
+    "delete_topic_123" # Должен быть пропущен
+]
+
+print("\n🔍 Тестируем обработчик без паттерна:")
+for data in test_data:
+    matches = test_check_update(data)
+    print(f"  {data}: {'✅ будет обработан' if matches else '❌ будет пропущен'}")
+
+
+################################################################################
+# 27/39: test_admin_settings.py
+################################################################################
+
+# test_admin_settings.py
+from db.database import engine, Base
+from db.models import AdminSettings
+
+# Создаем таблицу если её нет
+Base.metadata.create_all(bind=engine, tables=[AdminSettings.__table__])
+print("✅ Таблица admin_settings готова")
+
+# Проверяем администраторов из config
+from config import Config
+print(f"📋 Администраторы из config: {Config.ADMIN_IDS}")
+
+
+################################################################################
+# 28/39: test_callback.py
+################################################################################
+
+# test_callback.py
+import sys
+sys.path.append('.')
+
+from telegram.ext import CallbackQueryHandler
+from admin.settings import handle_settings_callback
+
+# Проверяем паттерн обработчика
+handler = CallbackQueryHandler(
+    handle_settings_callback, 
+    pattern="^(toggle_csv_setting|reset_settings|settings_back)$"
+)
+
+print(f"✅ Обработчик создан: {handler}")
+print(f"📋 Паттерн: {handler.pattern}")
+
+# Проверяем совпадение паттернов
+test_data = [
+    "toggle_csv_setting",
+    "reset_settings", 
+    "settings_back",
+    "edit_topic_123",  # Не должен совпадать
+    "delete_topic_123" # Не должен совпадать
+]
+
+for data in test_data:
+    matches = handler.check_update({'data': data})
+    print(f"  {data}: {'✅ совпадает' if matches else '❌ не совпадает'}")
+
+
+################################################################################
+# 29/39: test_callback_real.py
+################################################################################
+
+# test_callback_real.py
+import sys
+sys.path.append('.')
+
+from telegram import Update, CallbackQuery, Message, User, Chat
+from telegram.ext import CallbackQueryHandler
+from admin.settings import handle_settings_callback
+import asyncio
+
+# Создаем мок-объекты для тестирования
+def create_mock_update(callback_data: str):
+    """Создает mock update объект для тестирования"""
+    # Создаем пользователя
+    user = User(id=90299004, first_name="Test", is_bot=False)
+    
+    # Создаем чат
+    chat = Chat(id=90299004, type="private")
+    
+    # Создаем сообщение
+    message = Message(
+        message_id=1,
+        date=None,
+        chat=chat,
+        text="Test"
+    )
+    
+    # Создаем callback query
+    callback_query = CallbackQuery(
+        id="test_callback_id",
+        from_user=user,
+        chat_instance="test_chat_instance",
+        data=callback_data,
+        message=message
+    )
+    
+    # Создаем update
+    update = Update(update_id=1, callback_query=callback_query)
+    
+    return update
+
+# Тестируем
+handler = CallbackQueryHandler(handle_settings_callback)
+
+print(f"✅ Обработчик создан: {handler}")
+
+# Проверяем, что handler принимает update
+test_data = [
+    "toggle_csv_setting",
+    "reset_settings", 
+    "settings_back",
+]
+
+print("\n🔍 Тестируем обработчик с реальными объектами:")
+for data in test_data:
+    update = create_mock_update(data)
+    try:
+        # Проверяем, принимает ли handler этот update
+        check_result = handler.check_update(update)
+        print(f"  {data}: {'✅ принимается' if check_result else '❌ не принимается'}")
+    except Exception as e:
+        print(f"  {data}: ❌ ошибка - {e}")
+
+
+################################################################################
+# 30/39: user/__init__.py
+################################################################################
+
+# user/__init__.py
+from .message_handler import handle_message, process_hashtag, normalize_hashtag
+
+__all__ = [
+    'handle_message',
+    'process_hashtag', 
+    'normalize_hashtag',
+    'handle_registration'
+]
+
+
+################################################################################
+# 31/39: user/message_handler.py
+################################################################################
+
+import re
+import asyncio
+from datetime import datetime
+import pytz
+from telegram import Update
+from telegram.ext import ContextTypes
+from db.database import SessionLocal
+from db.models import User, Hashtag, Action, TopicRule, BotSettings
+from config import Config
+from utils.cleanup import delete_after_3s, delete_after_5s
+from utils.logger import log_hashtag_action, logger
+from utils.hashtag_utils import normalize_hashtag
+
+
+async def process_hashtag(session, tag, rules, msg, now, tz):
+    normalized_tag = normalize_hashtag(tag)
+    valid_rule = None
+    for rule in rules:
+        if normalized_tag == rule.hashtag_prefix or normalized_tag.startswith(rule.hashtag_prefix + '_'):
+            valid_rule = rule
+            break
+    if not valid_rule:
+        return False
+
+    now_naive = now.replace(tzinfo=None)
+    if valid_rule.start_datetime and now_naive < valid_rule.start_datetime:
+        return False
+    if valid_rule.end_datetime and now_naive > valid_rule.end_datetime:
+        return False
+
+    today_start = datetime.combine(now.date(), datetime.min.time())
+    existing = session.query(Action).join(Hashtag, Action.hashtag_id == Hashtag.id).filter(
+        Action.uid == msg.from_user.id,
+        Hashtag.name_hashtag == normalized_tag,
+        Action.datetime >= today_start
+    ).first()
+    if existing:
+        return False
+
+    hashtag_obj = session.query(Hashtag).filter_by(name_hashtag=normalized_tag).first()
+    if not hashtag_obj:
+        hashtag_obj = Hashtag(name_hashtag=normalized_tag)
+        session.add(hashtag_obj)
+        session.commit()
+
+    action = Action(uid=msg.from_user.id, pid=msg.message_id, hashtag_id=hashtag_obj.id, datetime=now)
+    session.add(action)
+    session.commit()
+
+    display_name = msg.from_user.username or f"uid @{msg.from_user.id}"
+    success_msg = await msg.reply_text(f"✅ {display_name} — принято!")
+    asyncio.create_task(delete_after_3s(success_msg))
+
+    log_hashtag_action(
+        user_id=msg.from_user.id,
+        username=msg.from_user.username,
+        thread_id=msg.message_thread_id,
+        hashtag=normalized_tag,
+        status="принят",
+        reason=""
+    )
+    return True
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    chat = update.effective_chat
+    text_content = (msg.text or msg.caption or "").strip()
+    if not text_content:
+        return
+
+    tz = pytz.timezone(Config.TIMEZONE)
+    now = datetime.now(tz)
+
+    # Получаем настройки
+    session = SessionLocal()
+    try:
+        bot_settings = session.query(BotSettings).filter_by(id=1).first()
+        intro_chat_id = bot_settings.intro_chat_id if bot_settings else None
+    finally:
+        session.close()
+
+    # Логируем для отладки
+    logger.info(f"Сообщение в чате {chat.id} (intro_chat_id={intro_chat_id}) от user {msg.from_user.id}")
+
+    is_intro_chat = intro_chat_id is not None and chat.id == intro_chat_id
+    is_allowed_chat = chat.id in Config.ALLOWED_CHAT_IDS
+
+    # --------- 1️⃣ ЧАТ ЗНАКОМСТВА ---------
+    if is_intro_chat:
+        session = SessionLocal()
+        try:
+            user = session.query(User).filter_by(uid=msg.from_user.id).first()
+            if not user:
+                user = User(uid=msg.from_user.id, username=msg.from_user.username, name="", fam="", city="")
+                session.add(user)
+            if msg.from_user.username:
+                user.username = msg.from_user.username
+
+            # Только здесь регистрируем "Имя Фамилия\nГород"
+            lines = [l.strip() for l in re.sub(r'[\u200b\r]+', '', text_content).split("\n") if l.strip()]
+            if len(lines) >= 2:
+                name_parts = lines[0].split(maxsplit=1)
+                user.name = name_parts[0]
+                user.fam = name_parts[1] if len(name_parts) > 1 else ""
+                user.city = lines[1]
+                session.commit()
+
+                success_msg = await msg.reply_text(f"✅ Принято!\n{user.name} {user.fam}\nгород: {user.city}")
+                asyncio.create_task(delete_after_3s(success_msg))
+            else:
+                error_msg = await msg.reply_text("❌ Неверный формат.\nПример:\nИмя Фамилия\nГород")
+                asyncio.create_task(delete_after_5s(error_msg))
+        finally:
+            session.close()
+        return  # 🔥 дальше сообщение не обрабатывается
+
+    # --------- 2️⃣ ОБЫЧНЫЕ ЧАТЫ ---------
+    # В обычных чатах: запрещённые чаты выходим
+    if not is_allowed_chat:
+        return
+
+    # Хештеги — только если есть ветка (thread)
+    if not msg.message_thread_id:
+        return
+
+    session = SessionLocal()
+    try:
+        rules = session.query(TopicRule).filter_by(chat_id=chat.id, thread_id=msg.message_thread_id).all()
+        if not rules:
+            return
+
+        raw_hashtags = re.findall(r'#(\w+[\w_]*)', text_content)
+        for raw_tag in raw_hashtags:
+            tag = normalize_hashtag(raw_tag)
+            if tag == "знакомство":
+                continue
+            await process_hashtag(session, tag, rules, msg, now, tz)
+    finally:
+        session.close()
+
+
+################################################################################
+# 32/39: utils/__init__.py
+################################################################################
+
+# utils/__init__.py
+from .cleanup import delete_after_5s, delete_after_3s
+from .logger import log_hashtag_action, log_admin_action, log_error
+from .stop_daemon import setup_stop_daemon, get_stop_daemon, StopDaemon
+from .utils import get_current_time, is_admin
+from .user_utils import get_user_display_info
+from .responses import reply_and_delete
+from .hashtag_utils import normalize_hashtag, validate_hashtag_prefix, extract_hashtags_from_text, match_hashtag_to_rule
+
+__all__ = [
+    'delete_after_5s',
+    'delete_after_3s',
+    'log_hashtag_action',
+    'log_admin_action',
+    'log_error',
+    'get_current_time',
+    'is_admin',
+    'get_user_display_info',
+    'reply_and_delete',
+    'setup_stop_daemon',
+    'get_stop_daemon',
+    'StopDaemon',
+    'normalize_hashtag',
+    'validate_hashtag_prefix',
+    'extract_hashtags_from_text',
+    'match_hashtag_to_rule',
+]
+
+
+################################################################################
+# 33/39: utils/cleanup.py
+################################################################################
+
+# utils/cleanup.py - должно быть так
+import asyncio
+
+async def delete_after(seconds: int, msg):
+    """Удаляет сообщение через указанное количество секунд"""
+    await asyncio.sleep(seconds)
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+
+async def delete_after_5s(msg):
+    """Удаляет сообщение через 5 секунд (успешные действия)"""
+    await delete_after(5, msg)
+
+async def delete_after_3s(msg):
+    """Удаляет сообщение через 3 секунды (ошибки)"""
+    await delete_after(3, msg)
+
+
+################################################################################
+# 34/39: utils/hashtag_utils.py
+################################################################################
+
+# utils/hashtag_utils.py
+"""Утилиты для работы с хештегами - единая логика для всего проекта"""
+
+def normalize_hashtag(hashtag: str) -> str:
+    """
+    Нормализует хештег: убирает #, приводит к нижнему регистру, обрезает пробелы.
+    Используется везде в проекте для единообразия.
+    
+    Args:
+        hashtag: Строка с хештегом (может быть с # или без)
+    
+    Returns:
+        Нормализованный хештег без # в нижнем регистре
+    """
+    if not hashtag:
+        return ""
+    
+    # Убираем пробелы
+    hashtag = hashtag.strip()
+    
+    # Убираем # если есть в начале
+    if hashtag.startswith('#'):
+        hashtag = hashtag[1:].strip()
+    
+    # Приводим к нижнему регистру
+    return hashtag.lower()
+
+def validate_hashtag_prefix(hashtag: str) -> tuple[bool, str]:
+    """
+    Проверяет валидность префикса хештега для сохранения в БД.
+    
+    Args:
+        hashtag: Хештег для проверки
+        
+    Returns:
+        tuple: (is_valid, error_message)
+    """
+    hashtag = normalize_hashtag(hashtag)
+    
+    if not hashtag:
+        return False, "Хештег не может быть пустым"
+    
+    if len(hashtag) > 100:
+        return False, "Хештег слишком длинный (макс. 100 символов)"
+    
+    # Проверяем допустимые символы (буквы, цифры, подчеркивание, дефис)
+    import re
+    if not re.match(r'^[a-zа-яё0-9_-]+$', hashtag):
+        return False, "Хештег содержит недопустимые символы. Допустимо: буквы, цифры, _, -"
+    
+    # Предупреждение, если хештег заканчивается на подчеркивание
+    warning = ""
+    if hashtag.endswith('_'):
+        warning = "⚠️ Внимание: хештег заканчивается на подчеркивание! Это может повлиять на обработку хештегов пользователей."
+    
+    return True, warning
+
+def extract_hashtags_from_text(text: str) -> list[str]:
+    """
+    Извлекает все хештеги из текста и нормализует их.
+    
+    Args:
+        text: Текст для парсинга
+        
+    Returns:
+        Список нормализованных хештегов
+    """
+    if not text:
+        return []
+    
+    import re
+    # Находим все слова, начинающиеся с #
+    raw_hashtags = re.findall(r'#(\w+[\w_-]*)', text)
+    
+    # Нормализуем каждый хештег
+    return [normalize_hashtag(tag) for tag in raw_hashtags]
+
+def match_hashtag_to_rule(hashtag: str, rule_hashtag_prefix: str) -> bool:
+    """
+    Проверяет, соответствует ли хештег правилу.
+    
+    Args:
+        hashtag: Нормализованный хештег
+        rule_hashtag_prefix: Префикс хештега из правила
+        
+    Returns:
+        True если хештег соответствует правилу
+    """
+    # Если хештег точно совпадает с префиксом
+    if hashtag == rule_hashtag_prefix:
+        return True
+    
+    # Если хештег начинается с префикса и заканчивается чем-то после подчеркивания
+    # Пример: префикс="послевкусие", хештег="послевкусие_01"
+    if hashtag.startswith(rule_hashtag_prefix + '_'):
+        return True
+    
+    return False
+
+
+################################################################################
+# 35/39: utils/logger.py
+################################################################################
+
+# utils/logger.py
+import logging
+from datetime import datetime
+from pathlib import Path
+
+# Настройка логгера
+logger = logging.getLogger("maraphon_bot")
+logger.setLevel(logging.INFO)
+
+# Создаем папку logs если её нет
+log_dir = Path("logs")
+log_dir.mkdir(exist_ok=True)
+
+# Форматтер
+formatter = logging.Formatter(
+    '%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+# Файловый обработчик
+file_handler = logging.FileHandler(log_dir / "bot.log", encoding='utf-8')
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+
+# Консольный обработчик (если нужно)
+# console_handler = logging.StreamHandler()
+# console_handler.setFormatter(formatter)
+# logger.addHandler(console_handler)
+
+def log_hashtag_action(
+    user_id: int,
+    username: str,
+    thread_id: int,
+    hashtag: str,
+    status: str,
+    reason: str = ""  # ← ОБЯЗАТЕЛЬНЫЙ параметр теперь
+):
+    """
+    Логирует действие с хештегом
+    
+    Args:
+        user_id: ID пользователя
+        username: Имя пользователя
+        thread_id: ID темы
+        hashtag: Хештег
+        status: "принят" или "отвергнут"
+        reason: Причина (обязательно для "отвергнут")
+    """
+    display_name = f"@{username}" if username else f"user_{user_id}"
+    
+    if status == "принят":
+        log_message = f"{display_name} | тема {thread_id} | #{hashtag} | ПРИНЯТ"
+    elif status == "отвергнут":
+        if not reason:
+            reason = "причина не указана"
+        log_message = f"{display_name} | тема {thread_id} | #{hashtag} | ОТВЕРГНУТ ({reason})"
+    else:
+        log_message = f"{display_name} | тема {thread_id} | #{hashtag} | {status.upper()}"
+    
+    logger.info(log_message)
+
+def log_admin_action(user_id: int, action: str, details: str = ""):
+    """Логирует действие администратора"""
+    details_text = f" | {details}" if details else ""
+    logger.info(f"ADMIN {user_id} | {action}{details_text}")
+
+def log_error(error: Exception, context: str = ""):
+    """Логирует ошибку"""
+    context_text = f" [{context}]" if context else ""
+    logger.error(f"{type(error).__name__}{context_text}: {error}")
+
+
+################################################################################
+# 36/39: utils/responses.py
+################################################################################
+
+# utils/responses.py
+import asyncio
+from telegram import Message
+from config import Config
+
+async def reply_and_delete(msg: Message, text: str, is_error: bool = False, delete_after: int = None):
+    """
+    Отправляет сообщение и автоматически удаляет его
+    
+    Args:
+        msg: Сообщение для ответа
+        text: Текст ответа
+        is_error: True для ошибок (удаление через 3 сек), False для успеха (через 5 сек)
+        delete_after: Кастомное время удаления в секундах
+    """
+    response = await msg.reply_text(text)
+    
+    if delete_after is not None:
+        delay = delete_after
+    else:
+        delay = Config.DELETE_ERROR_AFTER if is_error else Config.DELETE_SUCCESS_AFTER
+    
+    async def delete_later():
+        await asyncio.sleep(delay)
+        try:
+            await response.delete()
+        except Exception:
+            pass
+    
+    asyncio.create_task(delete_later())
+    return response
+
+
+################################################################################
+# 37/39: utils/stop_daemon.py
+################################################################################
+
+# utils/stop_daemon.py 
+import io
+import csv
+import pytz
+from datetime import datetime, timedelta
+from db.database import SessionLocal
+from db.models import TopicRule, Action, User, Hashtag
+from utils.user_utils import get_user_display_info
+from config import Config
+from utils.hashtag_utils import match_hashtag_to_rule
+
+class StopDaemon:
+    """Демон для точной отправки СТОП сообщений секунда в секунду"""
+    
+    def __init__(self, application):
+        # Храним ссылку на Application и Bot, чтобы работать в одном event loop
+        self.application = application
+        self.bot = application.bot
+    
+    def get_participants(self, rule, today_start):
+        """
+        Получает участников, попавших в окно действия хештега.
+        Формирует отображаемое имя по правилам:
+        - если есть Имя/Фамилия: "Имя Фамилия (@username|uid @id)"
+        - если нет Имени/Фамилии: "-- (@username|uid @id)"
+        """
+        session = SessionLocal()
+        try:
+            # Окно действия правила
+            start_dt = rule.start_datetime or today_start
+            end_dt = rule.end_datetime  # может быть None
+
+            q = session.query(Action, Hashtag).join(Hashtag, Action.hashtag_id == Hashtag.id).filter(
+                Action.datetime >= start_dt
+            )
+            if end_dt:
+                q = q.filter(Action.datetime <= end_dt)
+
+            actions = q.all()
+            
+            participants = []
+            seen_uids = set()
+            
+            for action, hashtag in actions:
+                if action.uid in seen_uids:
+                    continue
+                
+                # Используем единую функцию для проверки соответствия хештега правилу
+                if not (hashtag and match_hashtag_to_rule(hashtag.name_hashtag, rule.hashtag_prefix)):
+                    continue
+
+                seen_uids.add(action.uid)
+
+                # Достаём пользователя
+                user = session.query(User).filter_by(uid=action.uid).first()
+
+                if user:
+                    has_name = bool((user.name or "").strip() or (user.fam or "").strip())
+                    name_parts = []
+                    if user.name:
+                        name_parts.append(user.name.strip())
+                    if user.fam:
+                        name_parts.append(user.fam.strip())
+                    name_str = " ".join(name_parts)
+
+                    if user.username:
+                        identifier = f"@{user.username}"
+                    else:
+                        identifier = f"uid @{user.uid}"
+
+                    if has_name and name_str:
+                        display = f"{name_str} ({identifier})"
+                    else:
+                        display = f"-- ({identifier})"
+                else:
+                    identifier = f"uid @{action.uid}"
+                    display = f"-- ({identifier})"
+
+                points = rule.point_value
+                participants.append((display, points, action.datetime))
+            
+            return sorted(participants, key=lambda x: x[0])  # Сортируем по имени
+        finally:
+            session.close()
+    
+    async def create_csv_file(self, rule, participants):
+        """Создает CSV файл с результатами"""
+        if not participants:
+            return None, "Нет участников"
+        
+        tz = pytz.timezone(Config.TIMEZONE)
+        report_time = datetime.now(tz)
+        
+        # Создаем CSV в памяти
+        csv_buffer = io.StringIO()
+        csv_writer = csv.writer(csv_buffer, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+        
+        # Заголовки на русском
+        csv_writer.writerow(['№', 'Участник', 'Баллы', 'Хештег', 'Тема ID', 'Время действия', 'Время формирования отчета'])
+        
+        # Данные
+        for i, (display_name, points, action_time) in enumerate(participants, 1):
+            csv_writer.writerow([
+                i,
+                display_name,
+                points,
+                rule.hashtag_prefix,
+                rule.thread_id,
+                action_time.strftime('%d.%m.%Y %H:%M:%S'),
+                report_time.strftime('%d.%m.%Y %H:%M:%S')
+            ])
+        
+        # Получаем строку и конвертируем в байты
+        csv_content = csv_buffer.getvalue()
+        csv_buffer.close()
+        
+        csv_bytes = csv_content.encode('utf-8')
+        
+        # Имя файла на английском для совместимости
+        filename = f"results_{rule.hashtag_prefix}_{report_time.strftime('%Y%m%d_%H%M%S')}.csv"
+        
+        return csv_bytes, filename
+    
+    async def send_csv_to_admins(self, rule, participants):
+        """Отправляет CSV файл администраторам, которые включили опцию"""
+        try:
+            # Импортируем здесь, чтобы избежать циклических импортов
+            from admin.settings import get_admins_wanting_csv
+            
+            # Получаем список администраторов, которые хотят CSV
+            admin_ids = get_admins_wanting_csv()
+            
+            if not admin_ids:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] 📊 Нет администраторов с включенной опцией CSV")
+                return
+            
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] 📊 Найдено администраторов для отправки CSV: {len(admin_ids)}")
+            
+            # Создаем CSV файл
+            csv_bytes, filename = await self.create_csv_file(rule, participants)
+            
+            if not csv_bytes:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] 📊 Нечего отправлять - нет участников")
+                return
+            
+            # Отправляем каждому администратору
+            success_count = 0
+            for admin_id in admin_ids:
+                try:
+                    tz = pytz.timezone(Config.TIMEZONE)
+                    stop_time = datetime.now(tz)
+                    # Отправляем документ
+                    await self.bot.send_document(
+                        chat_id=admin_id,
+                        document=io.BytesIO(csv_bytes),
+                        filename=filename,
+                        caption=(
+                            f"📊 Результаты по теме #{rule.hashtag_prefix}\n"
+                            f"🔢 Тема ID: {rule.thread_id}\n"
+                            f"👥 Участников: {len(participants)}\n"
+                            f"⭐ Баллов за участие: {rule.point_value}\n"
+                            f"⏰ Время СТОП: {stop_time.strftime('%d.%m.%Y %H:%M:%S')}"
+                        )
+                    )
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] 📤 CSV отправлен администратору {admin_id}")
+                    success_count += 1
+                    
+                    # Также отправляем текстовый отчет для удобства
+                    if participants:
+                        report_text = f"📊 Отчет по теме #{rule.hashtag_prefix}:\n"
+                        for i, (display_name, points, action_time) in enumerate(participants, 1):
+                            time_str = action_time.strftime('%H:%M')
+                            report_text += f"{i}. {display_name} - {time_str} - {points}\n"
+                        
+                        report_text += f"\n✅ Всего: {len(participants)} участников"
+                        
+                        await self.bot.send_message(
+                            chat_id=admin_id,
+                            text=report_text
+                        )
+                    
+                except Exception as e:
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Ошибка отправки CSV администратору {admin_id}: {e}")
+            
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] 📊 CSV отправлен {success_count}/{len(admin_ids)} администраторам")
+                    
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Ошибка при отправке CSV: {e}")
+
+    async def send_stop_for_rule(self, rule):
+        """Отправляет СТОП сообщение для одной темы (асинхронно)"""
+        try:
+            tz = pytz.timezone(Config.TIMEZONE)
+            now = datetime.now(tz)
+            today_start = datetime.combine(now.date(), datetime.min.time())
+            
+            participants = self.get_participants(rule, today_start)
+            
+            # Сообщение 1: Заголовок — строгое "СТОП" по требованию
+            stop_header = "СТОП"
+            
+            # Сообщение 2: Список участников
+            if participants:
+                participants_msg = "Список участников:\n"
+                for i, (display_name, points, action_time) in enumerate(participants, 1):
+                    time_str = action_time.strftime('%H:%M')
+                    # Формат: Имя Фамилия (username/uid) - время - баллы
+                    participants_msg += f"{i}. {display_name} - {time_str} - {points}\n"
+            else:
+                participants_msg = "Список участников:\n\nНикто не успел."
+            
+            # Отправляем два сообщения в чат
+            await self.bot.send_message(
+                chat_id=Config.ALLOWED_CHAT_IDS[0],
+                message_thread_id=rule.thread_id,
+                text=stop_header
+            )
+            
+            await self.bot.send_message(
+                chat_id=Config.ALLOWED_CHAT_IDS[0],
+                message_thread_id=rule.thread_id,
+                text=participants_msg
+            )
+            
+            # Отправляем CSV файл администраторам
+            await self.send_csv_to_admins(rule, participants)
+            
+            # Обновляем статус в БД только ПОСЛЕ успешной отправки
+            session = SessionLocal()
+            try:
+                rule_db = session.query(TopicRule).filter_by(id=rule.id).first()
+                if rule_db:
+                    rule_db.stop_sent = True
+                    session.commit()
+            finally:
+                session.close()
+            
+            print(f"[{now.strftime('%H:%M:%S')}] 📤 STOP sent: #{rule.hashtag_prefix}")
+            return True
+                    
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ STOP error: {e}")
+            return False
+    
+    async def check_and_send_stops(self, context=None):
+        """Проверяет и отправляет СТОП (асинхронно)"""
+        try:
+            session = SessionLocal()
+            tz = pytz.timezone(Config.TIMEZONE)
+            now = datetime.now(tz)
+            current_time = now.replace(tzinfo=None)
+            
+            # ВОССТАНАВЛИВАЕМ ПРАВИЛЬНУЮ ЛОГИКУ:
+            # Ищем правила, время окончания которых наступило в пределах ±1 секунды от текущего времени
+            time_start = current_time - timedelta(seconds=1)
+            time_end = current_time + timedelta(seconds=1)
+            
+            # Правила, у которых время окончания в точности совпадает с текущим моментом
+            rules = session.query(TopicRule).filter(
+                TopicRule.chat_id == Config.ALLOWED_CHAT_IDS[0],
+                TopicRule.end_datetime.isnot(None),
+                TopicRule.end_datetime.between(time_start, time_end),
+                TopicRule.stop_sent == False
+            ).all()
+            
+            # Также обрабатываем правила, которые пропустили (время уже прошло, но stop_sent еще False)
+            past_rules = session.query(TopicRule).filter(
+                TopicRule.chat_id == Config.ALLOWED_CHAT_IDS[0],
+                TopicRule.end_datetime.isnot(None),
+                TopicRule.end_datetime < time_start,
+                TopicRule.stop_sent == False
+            ).all()
+            
+            all_rules = rules + past_rules
+
+            # Не отправляем СТОП, если время начала еще не наступило
+            eligible_rules = []
+            for rule in all_rules:
+                if rule.start_datetime and rule.start_datetime > current_time:
+                    continue
+                eligible_rules.append(rule)
+            
+            for rule in eligible_rules:
+                # Отправляем СТОП сообщение
+                await self.send_stop_for_rule(rule)
+            
+            session.close()
+            
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Ошибка в демоне: {e}")
+    
+_stop_daemon_instance = None
+
+def setup_stop_daemon(application):
+    """Регистрирует периодическую задачу СТОП в job_queue Application"""
+    global _stop_daemon_instance
+    
+    try:
+        _stop_daemon_instance = StopDaemon(application)
+        # Запускаем проверку каждую секунду в том же event loop, что и бот
+        application.job_queue.run_repeating(
+            _stop_daemon_instance.check_and_send_stops,
+            interval=1.0,
+            first=0.0,
+            name="stop_daemon"
+        )
+        return _stop_daemon_instance
+    except Exception as e:
+        print(f"❌ Ошибка запуска демона СТОП: {e}")
+        return None
+
+def get_stop_daemon():
+    """Возвращает экземпляр демона"""
+    return _stop_daemon_instance
+
+
+################################################################################
+# 38/39: utils/user_utils.py
+################################################################################
+
+# utils/user_utils.py
+from db.database import SessionLocal
+from db.models import User
+
+def get_user_display_info(user_id, rule_point_value=None, session=None):
+    """
+    Возвращает отображаемую информацию о пользователе с баллами
+    Формат: Имя Фамилия (username/uid) - баллы
+    
+    Args:
+        user_id: ID пользователя
+        rule_point_value: Количество баллов (опционально)
+        session: Сессия БД (опционально, создается если не передана)
+    
+    Returns:
+        tuple: (display_name, points) или display_name если points не указаны
+    """
+    close_session = False
+    if session is None:
+        session = SessionLocal()
+        close_session = True
+    
+    try:
+        user = session.query(User).filter_by(uid=user_id).first()
+        
+        if user:
+            # Собираем имя/фамилию
+            name_parts = []
+            if user.name:
+                name_parts.append(user.name)
+            if user.fam:
+                name_parts.append(user.fam)
+            
+            name_str = " ".join(name_parts) if name_parts else ""
+            
+            # Определяем идентификатор
+            if user.username:
+                identifier = f"@{user.username}"
+            else:
+                identifier = f"uid @{user_id}"
+            
+            # Формируем строку
+            if name_str:
+                display_name = f"{name_str} ({identifier})"
+            else:
+                display_name = identifier
+        else:
+            # Нет пользователя в базе
+            display_name = f"uid @{user_id}"
+        
+        if rule_point_value is not None:
+            return display_name, rule_point_value
+        else:
+            return display_name
+    
+    finally:
+        if close_session:
+            session.close()
+
+
+def get_user_display_info_with_session(session, user_id, rule_point_value=None):
+    """
+    Альтернативная версия для использования с существующей сессией
+    """
+    return get_user_display_info(user_id, rule_point_value, session)
+
+
+################################################################################
+# 39/39: utils/utils.py
+################################################################################
+
+# utils/utils.py - удаляем extract_hashtags
+from datetime import datetime, timedelta
+import pytz
+from config import Config
+
+def get_current_time():
+    """Возвращает текущее время в московской зоне"""
+    tz = pytz.timezone(Config.TIMEZONE)
+    return datetime.now(tz)
+
+def is_admin(user_id: int) -> bool:
+    """Проверяет права администратора"""
+    return user_id in Config.ADMIN_IDS
+
+# УДАЛЯЕМ старую функцию extract_hashtags - теперь она в hashtag_utils.py
+

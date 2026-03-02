@@ -1,0 +1,153 @@
+#!/bin/bash
+# generate_gitignore.sh - Генерация или обновление .gitignore
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+cat > .gitignore << 'EOF'
+# .gitignore для MaraphonBot
+
+# Конфиденциальные файлы
+.env
+.env.local
+.env.*.local
+secrets.*
+config.local.*
+private.*
+
+# Базы данных
+*.db
+*.sqlite
+*.db-journal
+test.db
+
+# Файлы Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Пип
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Единицы тестирования и покрытия
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+.mypy_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# celery
+celerybeat-schedule
+celerybeat.pid
+
+# окружения
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+desktop.ini
+Thumbs.db
+
+# Логи
+*.log
+logs/
+
+# Временные файлы
+*.tmp
+*.temp
+temp/
+tmp/
+cache/
+
+# CSV и Excel файлы
+*.csv
+*.xlsx
+*.xls
+
+# Медиа файлы
+uploads/
+media/
+images/
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.mp4
+*.mp3
+*.wav
+
+# Архивы
+*.zip
+*.tar.gz
+*.rar
+
+# Операционные системы
+*.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Файлы проекта
+instance/
+migrations/
+*.code-workspace
+*.sublime-project
+*.sublime-workspace
+
+# Ruff
+.ruff_cache/
+
+
+echo "✅ .gitignore создан/обновлен"
+
+# Показываем содержимое
+echo "📋 Содержимое .gitignore:"
+head -20 .gitignore
+echo "..."
+wc -l .gitignore

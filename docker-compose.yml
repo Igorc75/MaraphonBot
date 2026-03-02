@@ -1,0 +1,11 @@
+services:
+  bot:
+    build: .
+    container_name: maraphon_bot
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+      - ./maraphon.db:/app/maraphon.db
+    restart: unless-stopped
+    tty: true
