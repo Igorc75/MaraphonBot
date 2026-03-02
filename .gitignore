@@ -150,4 +150,4 @@ echo "✅ .gitignore создан/обновлен"
 echo "📋 Содержимое .gitignore:"
 head -20 .gitignore
 echo "..."
-wc -l .gitignore
+wc -l .gitignorevenv312/
