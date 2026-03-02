@@ -4,7 +4,9 @@ from telegram.ext import ContextTypes
 from db.database import SessionLocal
 from db.models import TopicRule
 from config import Config
+from utils.auto_delete import auto_delete_user_message
 
+@auto_delete_user_message
 async def list_topics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private" or update.effective_user.id not in Config.ADMIN_IDS:
         return

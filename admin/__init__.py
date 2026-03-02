@@ -7,11 +7,7 @@ from .topic_edit import (
     edit_cancel,
     timeout_handler,
 )
-from .schedule import (
-    schedule_handler,
-    schedule_callback,
-    get_schedule_handlers
-)
+
 from .admin_manager import (
     show_admin_management,
     admin_management_callback,
@@ -28,9 +24,6 @@ __all__ = [
     'edit_topic_value',
     'edit_cancel',
     'timeout_handler',
-    'schedule_handler',
-    'schedule_callback',
-    'get_schedule_handlers',
     'show_admin_management',
     'admin_management_callback',
     'create_invite',

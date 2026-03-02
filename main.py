@@ -42,7 +42,6 @@ from admin.settings import (
     intro_chat_settings_handler,
 )  # ← Используем show_settings_panel
 from admin.admin_manager import show_admin_management, admin_management_callback, handle_invite_token
-from admin.schedule import schedule_handler, schedule_callback
 from admin.states import (
     EDIT_TOPIC_SELECT, EDIT_TOPIC_FIELD, EDIT_TOPIC_VALUE,
     DELETE_TOPIC_SELECT, DELETE_CONFIRM
@@ -142,7 +141,6 @@ def main():
     # Главное меню
     app.add_handler(MessageHandler(filters.Regex("^📋 Темы$"), show_topics_submenu))
     app.add_handler(MessageHandler(filters.Regex("^📊 Статистика$"), stats_handler))
-    app.add_handler(MessageHandler(filters.Regex("^📅 Расписание$"), schedule_handler))
     
     # Настройки - показываем подменю
     app.add_handler(MessageHandler(filters.Regex("^⚙️ Настройка$"), show_settings_panel))
@@ -171,11 +169,10 @@ def main():
     # Обработка сообщений в чатах (внутри handle_message есть строгая фильтрация по нужным chat_id)
     app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, handle_message))
     
-    # Регистрируем обработчики callback для настроек, расписания и управления админами
-    app.add_handler(CallbackQueryHandler(handle_settings_callback))  # Без паттерна, фильтруем внутри функции
-    
-    app.add_handler(CallbackQueryHandler(schedule_callback, pattern="^schedule_"))
     app.add_handler(CallbackQueryHandler(admin_management_callback, pattern="^admin_"))
+
+    # Регистрируем обработчики callback для настроек, расписания и управления админами
+    app.add_handler(CallbackQueryHandler(handle_settings_callback)) 
     
     # Чистый запуск
     print("=" * 60)

@@ -1,5 +1,5 @@
 #!/bin/bash
-# github_full.sh - Полная выгрузка проекта на GitHub с исключениями из .gitignore
+# github_full.sh - Полная выгрузка проекта на GitHub в ветку main
 
 # --- ОПРЕДЕЛЯЕМ КОРНЕВУЮ ПАПКУ ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,8 +40,7 @@ if [ -z "$GITHUB_USER" ]; then
 fi
 echo "🔑 GITHUB_USER загружен успешно: $GITHUB_USER"
 
-read -p "Введите номер версии (например, v3.0): " VERSION
-echo "🚀 Подготовка полной выгрузки версии $VERSION..."
+echo "🚀 Подготовка выгрузки в ветку main..."
 
 TMP_DIR=$(mktemp -d)
 echo "📁 Временная папка: $TMP_DIR"
@@ -57,8 +56,8 @@ create_exclude_file() {
     echo "*.db" >> "$exclude_file"
     echo "*.sqlite" >> "$exclude_file"
     echo "*.db-journal" >> "$exclude_file"
-    echo ".git" >> "$exclude_file"           # <-- добавлено
-    echo "/.git" >> "$exclude_file"          # <-- добавлено
+    echo ".git" >> "$exclude_file"
+    echo "/.git" >> "$exclude_file"
     
     # Читаем .gitignore если он существует
     if [ -f ".gitignore" ]; then
@@ -152,7 +151,7 @@ create_exclude_file() {
 # Создаем временный файл с исключениями
 EXCLUDE_FILE=$(mktemp)
 create_exclude_file "$EXCLUDE_FILE"
-echo "venv*" >> "$exclude_file"
+echo "venv*" >> "$EXCLUDE_FILE"
 
 # Показываем содержимое файла исключений (для отладки)
 if [ "${DEBUG:-false}" = "true" ]; then
@@ -170,36 +169,37 @@ rm "$EXCLUDE_FILE"
 
 cd "$TMP_DIR/project"
 
+# Инициализируем git и создаем коммит
 git init >/dev/null
-git checkout -b "$VERSION" >/dev/null
+git checkout -b main >/dev/null
 
 git config user.name "igorc75"
 git config user.email "ic75@mail.ru"
 
 git add .
-git commit -m "Выгрузка $VERSION: $(date '+%d.%m.%Y %H:%M')" >/dev/null
+git commit -m "Обновление $(date '+%d.%m.%Y %H:%M')" >/dev/null
 
-echo "📤 Отправка на GitHub..."
-git push --force "https://$GITHUB_TOKEN@github.com/$GITHUB_USER/$PROJECT_NAME.git" "$VERSION" >/dev/null
+echo "📤 Отправка на GitHub в ветку main (с перезаписью)..."
+git push --force "https://$GITHUB_TOKEN@github.com/$GITHUB_USER/$PROJECT_NAME.git" main >/dev/null
 
-# 🔍 Проверка — используем тот же регистр (Igorc75)
-echo "🔍 Проверяем наличие ветки $VERSION на GitHub..."
+# Проверяем результат
+echo "🔍 Проверяем наличие обновлений на GitHub..."
 
 sleep 5
 
 MAX_ATTEMPTS=3
 for ((i=1; i<=MAX_ATTEMPTS; i++)); do
-    BRANCH_CHECK=$(curl -s "https://api.github.com/repos/$GITHUB_USER/$PROJECT_NAME/branches/$VERSION" | grep '"name"')
+    BRANCH_CHECK=$(curl -s "https://api.github.com/repos/$GITHUB_USER/$PROJECT_NAME/branches/main" | grep '"name"')
     if [[ -n "$BRANCH_CHECK" ]]; then
         echo ""
-        echo "✅ УСПЕХ! Версия $VERSION загружена."
-        echo "🔗 https://github.com/$GITHUB_USER/$PROJECT_NAME/tree/$VERSION"
+        echo "✅ УСПЕХ! Проект обновлен в ветке main."
+        echo "🔗 https://github.com/$GITHUB_USER/$PROJECT_NAME/tree/main"
         exit 0
     fi
-    echo "   Попытка $i/$MAX_ATTEMPTS: ветка ещё не видна, ждём..."
+    echo "   Попытка $i/$MAX_ATTEMPTS: проверяем..."
     sleep 5
 done
 
 echo ""
-echo "❌ ОШИБКА: Ветка $VERSION не найдена на GitHub после $MAX_ATTEMPTS попыток!"
+echo "❌ ОШИБКА: Не удалось проверить обновление на GitHub!"
 exit 1

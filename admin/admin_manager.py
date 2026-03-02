@@ -12,6 +12,11 @@ from .decorators import admin_required
 from .keyboards import ADMIN_KEYBOARD, BACK_TO_ADMIN_MANAGEMENT
 import asyncio
 from utils.cleanup import delete_after_3s
+import logging
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 def generate_invite_token(length=32) -> str:
     """Генерирует безопасный токен для инвайта"""
@@ -112,38 +117,60 @@ async def get_admins_list_with_actions(context: ContextTypes.DEFAULT_TYPE):
         return text, keyboard
         
     except Exception as e:
-        print(f"Ошибка получения списка админов: {e}")
+        logger.error(f"Ошибка получения списка админов: {e}")
         return f"❌ Ошибка: {str(e)}", [[InlineKeyboardButton("⬅️ Назад", callback_data="admin_management_back")]]
 
 @admin_required
 async def create_invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Создает новую инвайт-ссылку"""
-    query = update.callback_query
-    await query.answer()
+    logger.info("=" * 50)
+    logger.info("ФУНКЦИЯ create_invite ВЫЗВАНА")
+    
+    # Проверяем тип update
+    if update.callback_query:
+        logger.info(f"Тип: callback_query, данные: {update.callback_query.data}")
+        query = update.callback_query
+        await query.answer()
+        message = query.message
+        user_id = query.from_user.id
+    elif update.message:
+        logger.info(f"Тип: message, текст: {update.message.text}")
+        message = update.message
+        user_id = update.message.from_user.id
+    else:
+        logger.error("Неизвестный тип update")
+        return
+    
+    logger.info(f"User ID: {user_id}")
     
     session = SessionLocal()
     try:
         # Генерируем токен
         token = generate_invite_token()
+        logger.info(f"Сгенерирован токен: {token}")
         
         # Создаем инвайт (действует 24 часа, одноразовый)
+        expires_at = datetime.now() + timedelta(hours=24)
         invite = AdminInvite(
             token=token,
-            created_by=query.from_user.id,
-            expires_at=datetime.now() + timedelta(hours=24),
+            created_by=user_id,
+            expires_at=expires_at,
             max_uses=1,
             is_active=True
         )
         
         session.add(invite)
         session.commit()
+        logger.info(f"Инвайт сохранен в БД с ID: {invite.id}")
         
         # Получаем username бота
         bot_info = await context.bot.get_me()
         bot_username = bot_info.username
+        logger.info(f"Bot username: {bot_username}")
         
         # Создаем ссылку
         invite_link = create_invite_link(bot_username, token)
+        logger.info(f"Создана ссылка: {invite_link}")
         
         # Формируем сообщение
         text = (
@@ -153,7 +180,7 @@ async def create_invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Действует: 24 часа\n"
             f"• Одноразовая\n"
             f"• Создана: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
-            f"• Истекает: {invite.expires_at.strftime('%d.%m.%Y %H:%M')}\n\n"
+            f"• Истекает: {expires_at.strftime('%d.%m.%Y %H:%M')}\n\n"
             f"📋 <b>Отправьте эту ссылку новому администратору.</b>\n"
             f"При переходе по ссылке пользователь будет добавлен в администраторы."
         )
@@ -163,22 +190,76 @@ async def create_invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("⬅️ Назад к настройкам", callback_data="admin_management_back")]
         ]
         
-        await query.message.edit_text(
-            text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='HTML'
-        )
+        # Отправляем сообщение
+        try:
+            if update.callback_query:
+                # Пытаемся отредактировать существующее сообщение
+                try:
+                    await message.edit_text(
+                        text,
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                        parse_mode='HTML'
+                    )
+                    logger.info("Сообщение отредактировано")
+                except Exception as e:
+                    logger.warning(f"Не удалось отредактировать: {e}")
+                    # Отправляем новое сообщение
+                    await message.reply_text(
+                        text,
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                        parse_mode='HTML'
+                    )
+                    logger.info("Отправлено новое сообщение")
+            else:
+                # Просто отправляем новое сообщение
+                await message.reply_text(
+                    text,
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode='HTML'
+                )
+                logger.info("Отправлено новое сообщение (из message)")
+            
+            # Дополнительно отправляем ссылку в личные сообщения
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"🔗 <b>Ваша инвайт-ссылка:</b>\n<code>{invite_link}</code>",
+                    parse_mode='HTML'
+                )
+                logger.info("Ссылка отправлена в ЛС")
+            except Exception as e:
+                logger.warning(f"Не удалось отправить в ЛС: {e}")
+            
+            logger.info("✅ Инвайт-ссылка успешно создана и отправлена")
+            
+        except Exception as e:
+            logger.error(f"Ошибка при отправке сообщения: {e}")
         
     except Exception as e:
-        print(f"Ошибка создания инвайта: {e}")
-        await query.message.edit_text(
-            f"❌ Ошибка: {str(e)}",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("⬅️ Назад", callback_data="admin_management_back")]
-            ])
-        )
+        logger.error(f"ОШИБКА создания инвайта: {e}", exc_info=True)
+        session.rollback()
+        
+        error_text = f"❌ Ошибка: {str(e)}"
+        try:
+            if update.callback_query:
+                await message.edit_text(
+                    error_text,
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("⬅️ Назад", callback_data="admin_management_back")]
+                    ])
+                )
+            else:
+                await message.reply_text(
+                    error_text,
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("⬅️ Назад", callback_data="admin_management_back")]
+                    ])
+                )
+        except:
+            pass
     finally:
         session.close()
+        logger.info("=" * 50)
 
 async def list_invites(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает список активных инвайтов"""
@@ -234,7 +315,7 @@ async def list_invites(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
     except Exception as e:
-        print(f"Ошибка получения списка инвайтов: {e}")
+        logger.error(f"Ошибка получения списка инвайтов: {e}")
         await query.message.edit_text(
             f"❌ Ошибка: {str(e)}",
             reply_markup=InlineKeyboardMarkup([
@@ -308,7 +389,7 @@ async def delete_admin_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         
     except Exception as e:
-        print(f"Ошибка при подготовке удаления: {e}")
+        logger.error(f"Ошибка при подготовке удаления: {e}")
         await query.message.edit_text(
             f"❌ Ошибка: {str(e)}",
             reply_markup=InlineKeyboardMarkup([
@@ -369,7 +450,7 @@ async def confirm_delete_admin(update: Update, context: ContextTypes.DEFAULT_TYP
             
     except Exception as e:
         session.rollback()
-        print(f"Ошибка удаления администратора: {e}")
+        logger.error(f"Ошибка удаления администратора: {e}")
         await query.message.edit_text(
             f"❌ Ошибка при удалении: {str(e)}",
             reply_markup=InlineKeyboardMarkup([
@@ -409,7 +490,7 @@ async def cleanup_invites(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         session.rollback()
-        print(f"Ошибка очистки инвайтов: {e}")
+        logger.error(f"Ошибка очистки инвайтов: {e}")
         await query.message.edit_text(
             f"❌ Ошибка: {str(e)}",
             reply_markup=InlineKeyboardMarkup([
@@ -491,39 +572,63 @@ async def handle_invite_token(user_id: int, token: str, context: ContextTypes.DE
         
     except Exception as e:
         session.rollback()
-        print(f"Ошибка обработки инвайт-токена: {e}")
+        logger.error(f"Ошибка обработки инвайт-токена: {e}")
         return False, f"❌ Ошибка: {str(e)}"
     finally:
         session.close()
 
 async def admin_management_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает callback от меню управления администраторами"""
+    print("\n" + "🔥"*50)
+    print("🔥 admin_management_callback ВЫЗВАНА")
+    
     query = update.callback_query
     
     if not query:
+        print("❌ НЕТ QUERY В CALLBACK!")
         return
+    
+    print(f"📞 Данные callback: {query.data}")
+    print(f"👤 От пользователя: {query.from_user.id}")
+    print(f"💬 Текст сообщения: {query.message.text[:100] if query.message else 'Нет сообщения'}")
+    print("🔥"*50 + "\n")
     
     await query.answer()
     
+    # Логируем callback для отладки
+    logger.info(f"admin_management_callback: получен callback с данными: {query.data}")
+    
     if query.data == "admin_management_back":
-        from .settings import show_settings_panel
-        await show_settings_panel(update, context)
+        # Удаляем текущее сообщение
+        await query.message.delete()
+        # Вызываем возврат в меню БЕЗ сообщения
+        from admin.menu import admin_menu_back
+        await admin_menu_back(update, context)
         return
     
     elif query.data == "admin_list_refresh":
+        logger.info("Вызвано обновление списка админов")
         await refresh_admin_list(update, context)
     
     elif query.data == "admin_create_invite":
+        logger.info("=" * 50)
+        logger.info("ПОЛУЧЕН ЗАПРОС НА СОЗДАНИЕ ИНВАЙТ-ССЫЛКИ")
+        logger.info(f"От пользователя: {query.from_user.id}")
+        logger.info("=" * 50)
         await create_invite(update, context)
     
     elif query.data == "admin_list_invites":
+        logger.info("Вызван просмотр списка инвайтов")
         await list_invites(update, context)
     
     elif query.data.startswith("admin_delete_") and "confirm" not in query.data:
+        logger.info(f"Вызвано удаление администратора: {query.data}")
         await delete_admin_handler(update, context)
     
     elif query.data.startswith("admin_delete_confirm_"):
+        logger.info(f"Подтверждение удаления: {query.data}")
         await confirm_delete_admin(update, context)
     
     elif query.data == "admin_cleanup_invites":
+        logger.info("Вызвана очистка инвайтов")
         await cleanup_invites(update, context)

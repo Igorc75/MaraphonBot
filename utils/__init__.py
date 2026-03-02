@@ -6,6 +6,7 @@ from .utils import get_current_time, is_admin
 from .user_utils import get_user_display_info
 from .responses import reply_and_delete
 from .hashtag_utils import normalize_hashtag, validate_hashtag_prefix, extract_hashtags_from_text, match_hashtag_to_rule
+from .auto_delete import reply_and_del, send_and_del  # ← ЭТА СТРОКА ДОЛЖНА БЫТЬ
 
 __all__ = [
     'delete_after_5s',
@@ -24,4 +25,9 @@ __all__ = [
     'validate_hashtag_prefix',
     'extract_hashtags_from_text',
     'match_hashtag_to_rule',
+    'reply_and_del',
+    'send_and_del',
+    'auto_delete_user_message',
+    'clean_chat',
+    'save_message',
 ]

@@ -1,4 +1,4 @@
-# admin/menu.py - УЛУЧШЕННАЯ ВЕРСИЯ
+# admin/menu.py
 from telegram import Update
 from telegram.ext import ContextTypes
 from db.database import SessionLocal
@@ -6,72 +6,63 @@ from db.models import AdminSettings
 from config import Config
 from .keyboards import ADMIN_KEYBOARD, TOPICS_SUBMENU
 from utils.logger import log_admin_action
+from utils.auto_delete import auto_delete_user_message
+from utils.chat_cleaner import clean_chat, save_message
 
 async def is_chat_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Проверяет, является ли пользователь администратором"""
-    if not update.effective_user or not update.effective_chat:
+    if not update.effective_user:
         return False
     
     user_id = update.effective_user.id
     
-    # 1. Суперадмины из конфига
+    # 1. Проверяем суперадминов из конфига
     if user_id in Config.ADMIN_IDS:
         return True
     
-    # 2. Админы из базы
+    # 2. Проверяем администраторов из базы данных
     session = SessionLocal()
     try:
-        admin_settings = session.query(AdminSettings).filter_by(user_id=user_id).first()
-        if admin_settings:
+        admin = session.query(AdminSettings).filter_by(user_id=user_id).first()
+        if admin:
             return True
     except Exception as e:
         print(f"Ошибка проверки админа в БД: {e}")
     finally:
         session.close()
     
-    # 3. Админы чата (только для групп)
-    if update.effective_chat.type in ["group", "supergroup"]:
-        try:
-            admins = await context.bot.get_chat_administrators(update.effective_chat.id)
-            admin_ids = [admin.user.id for admin in admins]
-            return user_id in admin_ids
-        except Exception as e:
-            print(f"Ошибка проверки админов чата: {e}")
-    
     return False
 
-async def send_message_safely(update, context, text, **kwargs):
-    """Безопасная отправка сообщения"""
-    try:
-        if update.message:
-            await update.message.reply_text(text, **kwargs)
-        elif update.callback_query:
-            if update.callback_query.message:
-                await update.callback_query.message.reply_text(text, **kwargs)
-            else:
-                await update.effective_chat.send_message(text, **kwargs)
-        else:
-            await update.effective_chat.send_message(text, **kwargs)
-    except Exception as e:
-        print(f"Ошибка отправки: {e}")
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=text,
-            **kwargs
+async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, keyboard):
+    """Показывает меню, предварительно очистив чат"""
+    # Очищаем чат от старых сообщений
+    await clean_chat(update, context)
+    
+    # Отправляем новое сообщение
+    if update.callback_query:
+        sent = await update.callback_query.message.reply_text(
+            text,
+            reply_markup=keyboard,
+            parse_mode='HTML'
         )
+        await update.callback_query.answer()
+    else:
+        sent = await update.message.reply_text(
+            text,
+            reply_markup=keyboard,
+            parse_mode='HTML'
+        )
+    
+    # Сохраняем ID сообщения
+    await save_message(context, update.effective_chat.id, sent.message_id)
 
+@auto_delete_user_message
 async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Главное меню администратора"""
+    print(f"🔥 admin_menu вызвана от пользователя {update.effective_user.id}")
+    
     if not await is_chat_admin(update, context):
-        log_admin_action(
-            user_id=update.effective_user.id,
-            action="access_denied",
-            details="Попытка доступа к админке"
-        )
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="❌ Доступ запрещён"
-        )
+        print(f"❌ Доступ запрещён для пользователя {update.effective_user.id}")
         return
     
     log_admin_action(
@@ -80,14 +71,14 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         details="Главное меню"
     )
     
-    await send_message_safely(
-        update=update,
-        context=context,
-        text="🔧 <b>Админка Maraphon</b>",
-        reply_markup=ADMIN_KEYBOARD,
-        parse_mode='HTML'
+    await show_menu(
+        update,
+        context,
+        "🔧 <b>Админка Марафон</b>\n\nВыберите действие:",
+        ADMIN_KEYBOARD
     )
 
+@auto_delete_user_message
 async def show_topics_submenu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Подменю управления темами"""
     if not await is_chat_admin(update, context):
@@ -99,10 +90,9 @@ async def show_topics_submenu(update: Update, context: ContextTypes.DEFAULT_TYPE
         details="Подменю тем"
     )
     
-    await send_message_safely(
-        update=update,
-        context=context,
-        text="📋 <b>Управление темами</b>",
-        reply_markup=TOPICS_SUBMENU,
-        parse_mode='HTML'
+    await show_menu(
+        update,
+        context,
+        "📋 <b>Управление темами</b>\n\nВыберите действие:",
+        TOPICS_SUBMENU
     )

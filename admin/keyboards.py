@@ -3,7 +3,7 @@ from telegram import ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardBu
 
 # Главное меню
 ADMIN_KEYBOARD = ReplyKeyboardMarkup(
-    [["📋 Темы", "📊 Статистика"], ["📅 Расписание", "⚙️ Настройка"]],
+    [["📋 Темы"], ["📊 Статистика"], ["⚙️ Настройка"]],
     resize_keyboard=True,
     one_time_keyboard=False,
     input_field_placeholder="Выберите действие..."

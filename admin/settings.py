@@ -1,4 +1,4 @@
-# admin/settings.py - ИСПРАВЛЕННАЯ ВЕРСИЯ (с поддержкой темы)
+# admin/settings.py
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
@@ -6,10 +6,11 @@ from db.database import SessionLocal
 from db.models import AdminSettings, BotSettings
 from config import Config
 from .keyboards import SETTINGS_SUBMENU, ADMIN_KEYBOARD
-from utils.cleanup import delete_after_3s, delete_after
 from utils.logger import log_admin_action
 import asyncio
 import re
+from utils.auto_delete import reply_and_del, auto_delete_user_message
+
 
 # ==================== ФУНКЦИИ РАБОТЫ С БД ====================
 
@@ -158,8 +159,9 @@ def parse_chat_id_from_link(text: str) -> tuple[int | None, int | None]:
 
 # ==================== ОБРАБОТЧИКИ ТЕЛЕГРАМ ====================
 
+@auto_delete_user_message
 async def show_settings_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает панель настроек администратора - ПОДМЕНЮ"""
+    """Показывает панель настроек администратора"""
     if update.effective_user.id not in Config.ADMIN_IDS:
         return
     
@@ -169,11 +171,12 @@ async def show_settings_panel(update: Update, context: ContextTypes.DEFAULT_TYPE
         details="Открыта панель настроек"
     )
     
-    await update.message.reply_text(
-        "⚙️ <b>Настройки бота</b>\n\n"
-        "Выберите раздел для настройки:",
-        reply_markup=SETTINGS_SUBMENU,
-        parse_mode='HTML'
+    from admin.menu import show_menu
+    await show_menu(
+        update,
+        context,
+        "⚙️ <b>Настройки бота</b>\n\nВыберите раздел:",
+        SETTINGS_SUBMENU
     )
 
 async def csv_settings_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -185,12 +188,13 @@ async def csv_settings_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     settings = get_admin_settings(user_id)
     
     if not settings:
-        await update.message.reply_text(
+        await reply_and_del(update.message,  # ← заменено на reply_and_del
             "❌ Не удалось загрузить настройки. Проверьте подключение к БД.",
             reply_markup=SETTINGS_SUBMENU
         )
         return
     
+    # Сообщение с инлайн-кнопками - НЕ УДАЛЯЕМ (оставляем как есть)
     text = (
         "⚙️ <b>Настройки администратора</b>\n\n"
         f"🆔 Ваш ID: {user_id}\n"
@@ -208,14 +212,11 @@ async def csv_settings_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             )
         ],
         [
-            InlineKeyboardButton("Сбросить все настройки", callback_data="reset_settings")
-        ],
-        [
             InlineKeyboardButton("Назад к настройкам", callback_data="settings_back")
         ]
     ]
     
-    await update.message.reply_text(
+    await update.message.reply_text(  # ← оставляем обычный reply_text (с кнопками)
         text,
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='HTML'
@@ -246,13 +247,11 @@ async def intro_chat_settings_handler(update: Update, context: ContextTypes.DEFA
         [InlineKeyboardButton("Назад к настройкам", callback_data="settings_panel")],
     ]
 
-    await update.message.reply_text(
-        "👋 <b>Чат знакомства</b>\n\n"
-        f"Текущий чат: {intro_text}\n\n"
-        "Нажмите «Установить по ссылке» и пришлите ссылку на любое сообщение из чата знакомства\n"
-        "(формат: <code>https://t.me/c/...</code>).",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="HTML",
+    # НЕ ОТПРАВЛЯЕМ СООБЩЕНИЕ - только логируем
+    log_admin_action(
+        user_id=update.effective_user.id,
+        action="intro_chat_settings_opened",
+        details=f"Текущий чат: {intro_text}"
     )
 
 async def handle_intro_chat_link_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -268,46 +267,44 @@ async def handle_intro_chat_link_message(update: Update, context: ContextTypes.D
     intro_chat_id, intro_thread_id = parse_chat_id_from_link(text)
 
     if not intro_chat_id:
-        err = await update.message.reply_text(
+        await reply_and_del(update.message,  # ← заменено на reply_and_del
             "❌ Неверный формат.\n\nПример ссылки:\n"
             "<code>https://t.me/c/3849962819/2</code>\n\n"
             "Или пришлите числовой chat_id (например <code>-100...</code>).",
             parse_mode="HTML",
             reply_markup=SETTINGS_SUBMENU,
         )
-        asyncio.create_task(delete_after(5, err))
         return True
 
     # Проверяем, что бот состоит в этом чате и чат доступен
     try:
         chat = await context.bot.get_chat(intro_chat_id)
         if chat.type not in ["group", "supergroup"]:
-            msg = await update.message.reply_text(
+            await reply_and_del(update.message,  # ← заменено на reply_and_del
                 "❌ Указанный чат не является группой или супергруппой.",
                 reply_markup=SETTINGS_SUBMENU
             )
-            asyncio.create_task(delete_after(5, msg))
             return True
     except TelegramError as e:
-        msg = await update.message.reply_text(
+        await reply_and_del(update.message,  # ← заменено на reply_and_del
             f"❌ Не удалось получить информацию о чате.\nОшибка: {e}",
             reply_markup=SETTINGS_SUBMENU
         )
-        asyncio.create_task(delete_after(5, msg))
         return True
 
     ok = set_intro_chat_id(intro_chat_id, intro_thread_id)
     if ok:
         thread_info = f", тема {intro_thread_id}" if intro_thread_id else ""
-        msg = await update.message.reply_text(
+        await reply_and_del(update.message,  # ← заменено на reply_and_del
             f"✅ Чат знакомства установлен: {chat.title} (ID: {intro_chat_id}{thread_info})",
             parse_mode="HTML",
             reply_markup=SETTINGS_SUBMENU,
         )
-        asyncio.create_task(delete_after(3, msg))
     else:
-        msg = await update.message.reply_text("❌ Не удалось сохранить настройку.", reply_markup=SETTINGS_SUBMENU)
-        asyncio.create_task(delete_after(5, msg))
+        await reply_and_del(update.message,  # ← заменено на reply_and_del
+            "❌ Не удалось сохранить настройку.",
+            reply_markup=SETTINGS_SUBMENU
+        )
     return True
 
 async def handle_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -318,7 +315,6 @@ async def handle_settings_callback(update: Update, context: ContextTypes.DEFAULT
     
     if query.data not in [
         "toggle_csv_setting",
-        "reset_settings",
         "settings_back",
         "settings_panel",
         "introchat_set",
@@ -334,7 +330,7 @@ async def handle_settings_callback(update: Update, context: ContextTypes.DEFAULT
     if query.data == "toggle_csv_setting":
         settings = get_admin_settings(user_id)
         if not settings:
-            await query.message.reply_text("❌ Ошибка: настройки не найдены")
+            await reply_and_del(query.message, "❌ Ошибка: настройки не найдены")  # ← заменено
             return
         
         new_value = not settings.receive_csv
@@ -347,56 +343,66 @@ async def handle_settings_callback(update: Update, context: ContextTypes.DEFAULT
                 details=f"CSV настройка изменена на: {new_value}"
             )
             
-            await csv_settings_handler(update, context)
-            
-            confirm_msg = await query.message.reply_text(
-                f"✅ Настройка обновлена: {'Буду получать CSV файлы' if new_value else 'Не буду получать CSV файлы'}"
-            )
-            asyncio.create_task(delete_after_3s(confirm_msg))
-        else:
-            await query.message.reply_text("❌ Ошибка при обновлении настроек")
-    
-    elif query.data == "reset_settings":
-        success = update_admin_settings(user_id, receive_csv=False)
-        
-        if success:
-            log_admin_action(
-                user_id=user_id,
-                action="settings_reset",
-                details="Настройки сброшены"
+            # Обновляем текст сообщения (это inline сообщение с кнопками - НЕ УДАЛЯЕМ)
+            text = (
+                "⚙️ <b>Настройки администратора</b>\n\n"
+                f"🆔 Ваш ID: {user_id}\n"
+                f"👤 Имя: {query.from_user.first_name or ''} {query.from_user.last_name or ''}\n"
+                f"📛 Юзернейм: @{query.from_user.username or 'не указан'}\n\n"
+                f"📁 <b>Получать CSV файлы после СТОП:</b> {'✅ ВКЛ' if new_value else '❌ ВЫКЛ'}\n\n"
+                "Выберите опцию для изменения:"
             )
             
-            await csv_settings_handler(update, context)
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        f"CSV после СТОП: {'ВКЛ' if new_value else 'ВЫКЛ'}",
+                        callback_data="toggle_csv_setting"
+                    )
+                ],
+                [
+                    InlineKeyboardButton("Назад к настройкам", callback_data="settings_back")
+                ]
+            ]
             
-            confirm_msg = await query.message.reply_text("✅ Все настройки сброшены")
-            asyncio.create_task(delete_after_3s(confirm_msg))
+            await query.message.edit_text(  # ← edit_text оставляем как есть
+                text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='HTML'
+            )
+            
         else:
-            await query.message.reply_text("❌ Ошибка при сбросе настроек")
+            await reply_and_del(query.message, "❌ Ошибка при обновлении настроек")  # ← заменено
     
     elif query.data == "settings_back":
-        from admin.menu import admin_menu
-        await admin_menu(update, context)
+        # Удаляем текущее сообщение
+        await query.message.delete()
+        # Вызываем возврат в меню БЕЗ сообщения
+        from admin.menu import admin_menu_back
+        await admin_menu_back(update, context)
 
     elif query.data == "settings_panel":
-        if query.message:
-            await query.message.reply_text(
-                "⚙️ <b>Настройки бота</b>\n\nВыберите раздел для настройки:",
-                reply_markup=SETTINGS_SUBMENU,
-                parse_mode="HTML",
-            )
+        # НЕ ОТПРАВЛЯЕМ СООБЩЕНИЕ - только логируем
+        log_admin_action(
+            user_id=user_id,
+            action="settings_panel_callback",
+            details="Возврат к панели настроек"
+        )
 
     elif query.data == "introchat_set":
         if query.message:
             context.user_data["awaiting_intro_chat_link"] = True
-            prompt = await query.message.reply_text(
-                "Пришлите ссылку на любое сообщение из чата знакомства.\n\n"
-                "Пример:\n<code>https://t.me/c/3849962819/2</code>",
-                parse_mode="HTML",
+            # НЕ ОТПРАВЛЯЕМ СООБЩЕНИЕ - только логируем
+            log_admin_action(
+                user_id=user_id,
+                action="introchat_set",
+                details="Ожидание ссылки на чат знакомства"
             )
-            asyncio.create_task(delete_after(5, prompt))
 
     elif query.data == "introchat_reset":
         set_intro_chat_id(None, None)
         if query.message:
-            msg = await query.message.reply_text("✅ Чат знакомства сброшен.", reply_markup=SETTINGS_SUBMENU)
-            asyncio.create_task(delete_after(3, msg))
+            await reply_and_del(query.message,  # ← заменено
+                "✅ Чат знакомства сброшен.",
+                reply_markup=SETTINGS_SUBMENU
+            )

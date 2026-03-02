@@ -9,9 +9,10 @@ from db.database import SessionLocal
 from db.models import TopicRule
 from config import Config
 from utils.hashtag_utils import normalize_hashtag, validate_hashtag_prefix
-from utils.cleanup import delete_after_3s
+from utils.auto_delete import reply_and_del, auto_delete_user_message
 from .keyboards import ADMIN_KEYBOARD, TOPICS_SUBMENU
 
+@auto_delete_user_message
 async def request_topic_format(update: Update, context: ContextTypes.DEFAULT_TYPE):
     example = (
         "📋 Отправьте данные темы одним сообщением в формате:\n\n"
@@ -21,8 +22,9 @@ async def request_topic_format(update: Update, context: ContextTypes.DEFAULT_TYP
         "• Балл: 10\n"
         "• Хештег: послевкусие_01"
     )
-    await update.message.reply_text(example, reply_markup=ReplyKeyboardRemove())
+    await reply_and_del(update.message, example, reply_markup=ReplyKeyboardRemove())
 
+@auto_delete_user_message
 async def add_topic_single(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private" or update.effective_user.id not in Config.ADMIN_IDS:
         return
@@ -106,7 +108,8 @@ async def add_topic_single(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if errors:
         error_text = "⚠️ Ошибки валидации:\n" + "\n".join(errors) + "\n\nПопробуйте снова:"
-        await update.message.reply_text(error_text, reply_markup=ReplyKeyboardRemove())
+        # Ошибка - удаляется через 3 сек
+        await reply_and_del(update.message, error_text, reply_markup=ReplyKeyboardRemove())
         return
     
     session = SessionLocal()
@@ -123,6 +126,7 @@ async def add_topic_single(update: Update, context: ContextTypes.DEFAULT_TYPE):
             start_str = existing_rule.start_datetime.strftime("%d.%m.%Y %H:%M") if existing_rule.start_datetime else "—"
             end_str = existing_rule.end_datetime.strftime("%d.%m.%Y %H:%M") if existing_rule.end_datetime else "—"
             
+            # Сообщение с инлайн-кнопками - НЕ УДАЛЯЕМ
             await update.message.reply_text(
                 f"❌ Хештег #{hashtag_prefix} уже существует!\n\n"
                 f"Информация о существующей теме:\n"
@@ -157,9 +161,11 @@ async def add_topic_single(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Окончание: {end_datetime.strftime('%d.%m.%Y %H:%M')}\n"
             f"• Балл: {point_value}"
         )
-        await update.message.reply_text(response, reply_markup=ADMIN_KEYBOARD)
+        # Успех - удаляется через 3 сек
+        await reply_and_del(update.message, response, reply_markup=ADMIN_KEYBOARD)
     except Exception as e:
         session.rollback()
-        await update.message.reply_text(f"❌ Ошибка сохранения: {e}", reply_markup=TOPICS_SUBMENU)
+        # Ошибка - удаляется через 3 сек
+        await reply_and_del(update.message, f"❌ Ошибка сохранения: {e}", reply_markup=TOPICS_SUBMENU)
     finally:
         session.close()

@@ -6,7 +6,9 @@ from db.models import TopicRule
 from config import Config
 from .states import DELETE_TOPIC_SELECT, DELETE_CONFIRM
 from .keyboards import TOPICS_SUBMENU
+from utils.auto_delete import reply_and_del, auto_delete_user_message
 
+@auto_delete_user_message
 async def start_delete_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Начало диалога удаления темы"""
     if update.effective_chat.type != "private" or update.effective_user.id not in Config.ADMIN_IDS:
@@ -16,7 +18,8 @@ async def start_delete_topic(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         rules = session.query(TopicRule).filter_by(chat_id=Config.ALLOWED_CHAT_IDS[0]).all()
         if not rules:
-            await update.message.reply_text("📭 Нет тем для удаления", reply_markup=TOPICS_SUBMENU)
+            # Информация - удаляется через 3 сек
+            await reply_and_del(update.message, "📭 Нет тем для удаления", reply_markup=TOPICS_SUBMENU)
             return ConversationHandler.END
         
         keyboard = [
@@ -25,6 +28,7 @@ async def start_delete_topic(update: Update, context: ContextTypes.DEFAULT_TYPE)
         ]
         keyboard.append([InlineKeyboardButton("⬅️ Отмена", callback_data="delete_cancel")])
         
+        # Сообщение с инлайн-кнопками - НЕ УДАЛЯЕМ
         await update.message.reply_text(
             "🗑️ Выберите тему для удаления:",
             reply_markup=InlineKeyboardMarkup(keyboard)
@@ -37,20 +41,15 @@ async def delete_topic_select(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Выбор темы для удаления"""
     query = update.callback_query
     
-    # Проверяем, есть ли query
     if not query:
         return ConversationHandler.END
     
     await query.answer()
     
     if query.data == "delete_cancel":
-        # Проверяем, есть ли сообщение для редактирования
-        if query.message:
-            await query.message.edit_text("⏹️ Удаление отменено")
-        else:
-            # Отправляем новое сообщение в чат
-            await update.effective_chat.send_message("⏹️ Удаление отменено")
-        
+        # Удаляем сообщение с выбором темы
+        await query.message.delete()
+        # Вызываем возврат в меню тем
         from .menu import show_topics_submenu
         await show_topics_submenu(update, context)
         return ConversationHandler.END
@@ -89,6 +88,7 @@ async def delete_topic_select(update: Update, context: ContextTypes.DEFAULT_TYPE
         ]
         
         if query.message:
+            # Сообщение с инлайн-кнопками - НЕ УДАЛЯЕМ
             await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
         else:
             await update.effective_chat.send_message(
@@ -104,16 +104,15 @@ async def confirm_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Подтверждение удаления"""
     query = update.callback_query
     
-    # Проверяем, есть ли query
     if not query:
         return ConversationHandler.END
     
     await query.answer()
     
     if "cancel" in query.data:
-        # Проверяем, есть ли сообщение для редактирования
         if query.message:
-            await query.message.edit_text("⏹️ Удаление отменено")
+            # Информация - удаляется через 3 сек
+            await reply_and_del(query.message, "⏹️ Удаление отменено")
         else:
             await update.effective_chat.send_message("⏹️ Удаление отменено")
         
@@ -141,10 +140,8 @@ async def confirm_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         success_text = f"✅ Тема #{hashtag} (ID: {thread_id}) успешно удалена!"
         
-        if query.message:
-            await query.message.edit_text(success_text)
-        else:
-            await update.effective_chat.send_message(success_text)
+        # Успех - удаляется через 3 сек
+        await reply_and_del(query.message, success_text)
         
         # Возвращаемся в меню тем
         from .menu import show_topics_submenu
@@ -154,12 +151,8 @@ async def confirm_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         session.rollback()
         error_text = f"❌ Ошибка при удалении: {e}"
-        
-        if query.message:
-            await query.message.edit_text(error_text)
-        else:
-            await update.effective_chat.send_message(error_text)
-        
+        # Ошибка - удаляется через 3 сек
+        await reply_and_del(query.message, error_text)
         return ConversationHandler.END
     finally:
         session.close()
