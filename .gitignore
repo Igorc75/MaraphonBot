@@ -80,6 +80,8 @@ env/
 ENV/
 env.bak/
 venv.bak/
+venv321/
+venv312/
 
 # IDEs
 .vscode/

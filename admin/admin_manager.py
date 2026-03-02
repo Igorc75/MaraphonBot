@@ -601,9 +601,9 @@ async def admin_management_callback(update: Update, context: ContextTypes.DEFAUL
     if query.data == "admin_management_back":
         # Удаляем текущее сообщение
         await query.message.delete()
-        # Вызываем возврат в меню БЕЗ сообщения
-        from admin.menu import admin_menu_back
-        await admin_menu_back(update, context)
+        # Вызываем возврат в меню
+        from admin.menu import admin_menu
+        await admin_menu(update, context)
         return
     
     elif query.data == "admin_list_refresh":

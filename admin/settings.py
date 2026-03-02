@@ -241,17 +241,27 @@ async def intro_chat_settings_handler(update: Update, context: ContextTypes.DEFA
     else:
         intro_text = "не задан"
 
+    text = (
+        f"👋 <b>Настройка чата знакомства</b>\n\n"
+        f"Текущий чат: {intro_text}\n\n"
+        f"📝 <b>Как настроить:</b>\n"
+        f"1. Откройте нужный чат/тему в Telegram\n"
+        f"2. Скопируйте ссылку на сообщение (например: https://t.me/c/3849962819/2)\n"
+        f"3. Нажмите кнопку «Установить по ссылке» и отправьте ссылку\n\n"
+        f"Или отправьте числовой ID чата (например -1001234567890)"
+    )
+
     keyboard = [
-        [InlineKeyboardButton("Установить по ссылке", callback_data="introchat_set")],
-        [InlineKeyboardButton("Сбросить", callback_data="introchat_reset")],
-        [InlineKeyboardButton("Назад к настройкам", callback_data="settings_panel")],
+        [InlineKeyboardButton("🔗 Установить по ссылке", callback_data="introchat_set")],
+        [InlineKeyboardButton("🗑️ Сбросить", callback_data="introchat_reset")],
+        [InlineKeyboardButton("⬅️ Назад к настройкам", callback_data="settings_back")]
     ]
 
-    # НЕ ОТПРАВЛЯЕМ СООБЩЕНИЕ - только логируем
-    log_admin_action(
-        user_id=update.effective_user.id,
-        action="intro_chat_settings_opened",
-        details=f"Текущий чат: {intro_text}"
+    # Отправляем сообщение с инструкцией
+    await update.message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='HTML'
     )
 
 async def handle_intro_chat_link_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -267,7 +277,7 @@ async def handle_intro_chat_link_message(update: Update, context: ContextTypes.D
     intro_chat_id, intro_thread_id = parse_chat_id_from_link(text)
 
     if not intro_chat_id:
-        await reply_and_del(update.message,  # ← заменено на reply_and_del
+        await reply_and_del(update.message,
             "❌ Неверный формат.\n\nПример ссылки:\n"
             "<code>https://t.me/c/3849962819/2</code>\n\n"
             "Или пришлите числовой chat_id (например <code>-100...</code>).",
@@ -280,13 +290,13 @@ async def handle_intro_chat_link_message(update: Update, context: ContextTypes.D
     try:
         chat = await context.bot.get_chat(intro_chat_id)
         if chat.type not in ["group", "supergroup"]:
-            await reply_and_del(update.message,  # ← заменено на reply_and_del
+            await reply_and_del(update.message,
                 "❌ Указанный чат не является группой или супергруппой.",
                 reply_markup=SETTINGS_SUBMENU
             )
             return True
     except TelegramError as e:
-        await reply_and_del(update.message,  # ← заменено на reply_and_del
+        await reply_and_del(update.message,
             f"❌ Не удалось получить информацию о чате.\nОшибка: {e}",
             reply_markup=SETTINGS_SUBMENU
         )
@@ -295,13 +305,13 @@ async def handle_intro_chat_link_message(update: Update, context: ContextTypes.D
     ok = set_intro_chat_id(intro_chat_id, intro_thread_id)
     if ok:
         thread_info = f", тема {intro_thread_id}" if intro_thread_id else ""
-        await reply_and_del(update.message,  # ← заменено на reply_and_del
+        await reply_and_del(update.message,
             f"✅ Чат знакомства установлен: {chat.title} (ID: {intro_chat_id}{thread_info})",
             parse_mode="HTML",
             reply_markup=SETTINGS_SUBMENU,
         )
     else:
-        await reply_and_del(update.message,  # ← заменено на reply_and_del
+        await reply_and_del(update.message,
             "❌ Не удалось сохранить настройку.",
             reply_markup=SETTINGS_SUBMENU
         )
@@ -377,9 +387,9 @@ async def handle_settings_callback(update: Update, context: ContextTypes.DEFAULT
     elif query.data == "settings_back":
         # Удаляем текущее сообщение
         await query.message.delete()
-        # Вызываем возврат в меню БЕЗ сообщения
-        from admin.menu import admin_menu_back
-        await admin_menu_back(update, context)
+        # Вызываем возврат в меню
+        from admin.menu import admin_menu
+        await admin_menu(update, context)
 
     elif query.data == "settings_panel":
         # НЕ ОТПРАВЛЯЕМ СООБЩЕНИЕ - только логируем
@@ -392,7 +402,17 @@ async def handle_settings_callback(update: Update, context: ContextTypes.DEFAULT
     elif query.data == "introchat_set":
         if query.message:
             context.user_data["awaiting_intro_chat_link"] = True
-            # НЕ ОТПРАВЛЯЕМ СООБЩЕНИЕ - только логируем
+            # Отправляем сообщение с инструкцией
+            await query.message.reply_text(
+                "📝 <b>Настройка чата знакомства</b>\n\n"
+                "Отправьте ссылку на сообщение в нужной теме:\n"
+                "<code>https://t.me/c/3849962819/2</code>\n\n"
+                "Или просто числовой ID чата:\n"
+                "<code>-1001234567890</code>\n\n"
+                "⏳ Ожидаю ссылку...",
+                parse_mode='HTML'
+            )
+            # Логируем действие
             log_admin_action(
                 user_id=user_id,
                 action="introchat_set",
