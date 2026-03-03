@@ -10,6 +10,7 @@ from db.models import AdminInvite, AdminInviteUsage, AdminSettings
 from config import Config
 from .decorators import admin_required
 from .keyboards import ADMIN_KEYBOARD, BACK_TO_ADMIN_MANAGEMENT
+from admin.auth import is_chat_admin
 import asyncio
 from utils.cleanup import delete_after_3s
 import logging
@@ -29,7 +30,7 @@ def create_invite_link(bot_username: str, token: str) -> str:
 
 async def show_admin_management(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает меню управления администраторами - сразу список админов"""
-    if update.effective_user.id not in Config.ADMIN_IDS:
+    if not await is_chat_admin(update, context):
         return
     
     # Получаем список админов

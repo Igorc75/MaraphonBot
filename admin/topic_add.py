@@ -10,6 +10,7 @@ from db.models import TopicRule
 from config import Config
 from utils.hashtag_utils import normalize_hashtag, validate_hashtag_prefix
 from .keyboards import ADMIN_KEYBOARD, TOPICS_SUBMENU
+from admin.auth import is_chat_admin
 
 async def request_topic_format(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает информацию о добавлении темы и отправляет чистый пример"""
@@ -45,7 +46,8 @@ async def request_topic_format(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 async def add_topic_single(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private" or update.effective_user.id not in Config.ADMIN_IDS:
+    if update.effective_chat.type != "private":
+    if not await is_chat_admin(update, context):
         return
 
     # Если админ сейчас вводит ссылку для чата знакомства — обрабатываем это

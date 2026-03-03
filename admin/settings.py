@@ -6,6 +6,7 @@ from db.database import SessionLocal
 from db.models import AdminSettings, BotSettings
 from config import Config
 from .keyboards import SETTINGS_SUBMENU, ADMIN_KEYBOARD
+from admin.auth import is_chat_admin
 from utils.logger import log_admin_action
 import asyncio
 import re
@@ -162,7 +163,7 @@ def parse_chat_id_from_link(text: str) -> tuple[int | None, int | None]:
 @auto_delete_user_message
 async def show_settings_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает панель настроек администратора"""
-    if update.effective_user.id not in Config.ADMIN_IDS:
+    if not await is_chat_admin(update, context):
         return
     
     log_admin_action(
@@ -181,7 +182,7 @@ async def show_settings_panel(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def csv_settings_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик кнопки '📁 CSV отчеты'"""
-    if update.effective_user.id not in Config.ADMIN_IDS:
+    if not await is_chat_admin(update, context):
         return
     
     user_id = update.effective_user.id
@@ -224,7 +225,8 @@ async def csv_settings_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def intro_chat_settings_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Настройка чата 'Знакомство'"""
-    if update.effective_user.id not in Config.ADMIN_IDS or update.effective_chat.type != "private":
+    if update.effective_chat.type != "private":
+    if not await is_chat_admin(update, context):
         return
 
     settings = get_bot_settings()

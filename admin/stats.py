@@ -7,7 +7,8 @@ import asyncio
 
 @auto_delete_user_message
 async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private" or update.effective_user.id not in Config.ADMIN_IDS:
+    if update.effective_chat.type != "private":
+    if not await is_chat_admin(update, context):
         return
     
     await update.message.reply_text(

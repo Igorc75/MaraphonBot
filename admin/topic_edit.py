@@ -9,6 +9,7 @@ from utils.hashtag_utils import normalize_hashtag, validate_hashtag_prefix
 from utils.auto_delete import reply_and_del, auto_delete_user_message
 from .states import EDIT_TOPIC_SELECT, EDIT_TOPIC_FIELD, EDIT_TOPIC_VALUE
 from .keyboards import TOPICS_SUBMENU, ADMIN_KEYBOARD
+from admin.auth import is_chat_admin
 from .timeout_utils import (
     setup_timeout_job, reset_timeout_job, cleanup_timeout_job,
     timeout_callback, edit_cancel, timeout_handler, TIMEOUT_SECONDS
@@ -18,7 +19,8 @@ import asyncio
 @auto_delete_user_message
 async def show_edit_topics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает список тем для редактирования"""
-    if update.effective_chat.type != "private" or update.effective_user.id not in Config.ADMIN_IDS:
+    if update.effective_chat.type != "private":
+    if not await is_chat_admin(update, context):
         return ConversationHandler.END
     
     session = SessionLocal()
@@ -146,7 +148,7 @@ async def edit_topic_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def edit_topic_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает ввод нового значения для поля"""
-    if update.effective_user.id not in Config.ADMIN_IDS:
+    if not await is_chat_admin(update, context):
         await cleanup_timeout_job(context)
         return ConversationHandler.END
     

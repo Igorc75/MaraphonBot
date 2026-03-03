@@ -6,12 +6,14 @@ from db.models import TopicRule
 from config import Config
 from .states import DELETE_TOPIC_SELECT, DELETE_CONFIRM
 from .keyboards import TOPICS_SUBMENU
+from admin.auth import is_chat_admin
 from utils.auto_delete import reply_and_del, auto_delete_user_message
 
 @auto_delete_user_message
 async def start_delete_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Начало диалога удаления темы"""
-    if update.effective_chat.type != "private" or update.effective_user.id not in Config.ADMIN_IDS:
+    if update.effective_chat.type != "private":
+    if not await is_chat_admin(update, context):
         return ConversationHandler.END
     
     session = SessionLocal()
